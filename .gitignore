@@ -1,0 +1,30 @@
+/target
+Cargo.lock
+
+# Environment configuration
+.env
+
+# Tauri
+/target/
+/src-tauri/target/
+
+# Build outputs
+/dist/
+/build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local data
+*.db
+*.db-shm
+*.db-wal
+/terminology/
