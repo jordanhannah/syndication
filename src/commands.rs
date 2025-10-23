@@ -242,6 +242,188 @@ pub async fn get_all_local_latest(
         .map_err(|e| format!("Storage error: {}", e))
 }
 
+/// Import terminology content into database
+#[tauri::command]
+pub async fn import_terminology(
+    terminology_type: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let storage = state.storage.lock().await;
+
+    // Get the latest version for this terminology
+    let version = storage
+        .get_latest(&terminology_type)
+        .await
+        .map_err(|e| format!("Failed to get latest version: {}", e))?;
+
+    let version = version.ok_or_else(|| {
+        format!(
+            "No downloaded version found for {}. Please sync first.",
+            terminology_type
+        )
+    })?;
+
+    if version.imported {
+        return Ok(format!(
+            "{} version {} already imported",
+            terminology_type, version.version
+        ));
+    }
+
+    let file_path = version
+        .file_path
+        .ok_or_else(|| format!("No file path found for {}", terminology_type))?;
+
+    // Create importer
+    let importer = crate::import::TerminologyImporter::new(&storage, version.id);
+
+    // Import based on terminology type
+    match terminology_type.as_str() {
+        "snomed" => {
+            importer
+                .import_snomed(std::path::Path::new(&file_path))
+                .await
+                .map_err(|e| format!("SNOMED import failed: {}", e))?;
+        }
+        "amt" => {
+            importer
+                .import_amt(std::path::Path::new(&file_path))
+                .await
+                .map_err(|e| format!("AMT import failed: {}", e))?;
+        }
+        "valuesets" => {
+            importer
+                .import_valuesets(std::path::Path::new(&file_path))
+                .await
+                .map_err(|e| format!("ValueSets import failed: {}", e))?;
+        }
+        _ => {
+            return Err(format!("Unknown terminology type: {}", terminology_type));
+        }
+    }
+
+    // Mark as imported
+    storage
+        .mark_imported(version.id)
+        .await
+        .map_err(|e| format!("Failed to mark as imported: {}", e))?;
+
+    Ok(format!(
+        "Successfully imported {} version {}",
+        terminology_type, version.version
+    ))
+}
+
+/// Search for codes across terminologies
+#[tauri::command]
+pub async fn search_terminology(
+    query: String,
+    terminology_types: Vec<String>,
+    limit: Option<i32>,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::queries::SearchResult>, String> {
+    let storage = state.storage.lock().await;
+    let pool = storage.pool();
+    let limit = limit.unwrap_or(20);
+
+    if terminology_types.is_empty() || terminology_types.contains(&"all".to_string()) {
+        // Search all terminologies
+        crate::queries::TerminologyQueries::search_all(pool, &query, limit)
+            .await
+            .map_err(|e| format!("Search failed: {}", e))
+    } else {
+        let mut results = Vec::new();
+
+        for term_type in terminology_types {
+            match term_type.as_str() {
+                "snomed" => {
+                    let snomed_results =
+                        crate::queries::TerminologyQueries::search_snomed(pool, &query, limit)
+                            .await
+                            .map_err(|e| format!("SNOMED search failed: {}", e))?;
+                    results.extend(snomed_results);
+                }
+                "amt" => {
+                    let amt_results =
+                        crate::queries::TerminologyQueries::search_amt(pool, &query, limit)
+                            .await
+                            .map_err(|e| format!("AMT search failed: {}", e))?;
+                    results.extend(amt_results);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(results)
+    }
+}
+
+/// Look up a specific code with synonyms
+#[tauri::command]
+pub async fn lookup_code(
+    code: String,
+    system: String,
+    state: State<'_, AppState>,
+) -> Result<Option<crate::queries::CodeLookupResult>, String> {
+    let storage = state.storage.lock().await;
+    let pool = storage.pool();
+
+    if system.contains("snomed") {
+        crate::queries::TerminologyQueries::lookup_snomed_code(pool, &code)
+            .await
+            .map_err(|e| format!("Lookup failed: {}", e))
+    } else if system.contains("amt") {
+        crate::queries::TerminologyQueries::lookup_amt_code(pool, &code)
+            .await
+            .map_err(|e| format!("Lookup failed: {}", e))
+    } else {
+        Err(format!("Unsupported system: {}", system))
+    }
+}
+
+/// Expand a ValueSet by URL
+#[tauri::command]
+pub async fn expand_valueset(
+    valueset_url: String,
+    state: State<'_, AppState>,
+) -> Result<Option<crate::queries::ValueSetExpansion>, String> {
+    let storage = state.storage.lock().await;
+    let pool = storage.pool();
+
+    crate::queries::TerminologyQueries::expand_valueset(pool, &valueset_url)
+        .await
+        .map_err(|e| format!("ValueSet expansion failed: {}", e))
+}
+
+/// Validate a code against a ValueSet
+#[tauri::command]
+pub async fn validate_code(
+    code: String,
+    system: String,
+    valueset_url: String,
+    state: State<'_, AppState>,
+) -> Result<crate::queries::ValidationResult, String> {
+    let storage = state.storage.lock().await;
+    let pool = storage.pool();
+
+    crate::queries::TerminologyQueries::validate_code(pool, &code, &system, &valueset_url)
+        .await
+        .map_err(|e| format!("Code validation failed: {}", e))
+}
+
+/// List all available ValueSets
+#[tauri::command]
+pub async fn list_valuesets(
+    state: State<'_, AppState>,
+) -> Result<Vec<(String, Option<String>)>, String> {
+    let storage = state.storage.lock().await;
+    let pool = storage.pool();
+
+    crate::queries::TerminologyQueries::list_valuesets(pool)
+        .await
+        .map_err(|e| format!("Failed to list ValueSets: {}", e))
+}
+
 /// Helper function to parse terminology type string
 fn parse_terminology_type(s: &str) -> Result<TerminologyType, String> {
     match s.to_lowercase().as_str() {

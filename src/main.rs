@@ -1,12 +1,16 @@
 mod auth;
 mod commands;
+mod import;
 mod ncts;
+mod parsers;
+mod queries;
 mod storage;
 
 use auth::TokenManager;
 use commands::{
-    fetch_all_versions, fetch_latest_version, get_all_local_latest, get_local_latest,
-    get_local_versions, sync_all_terminologies, sync_terminology, AppState,
+    expand_valueset, fetch_all_versions, fetch_latest_version, get_all_local_latest,
+    get_local_latest, get_local_versions, import_terminology, list_valuesets, lookup_code,
+    search_terminology, sync_all_terminologies, sync_terminology, validate_code, AppState,
 };
 use directories::ProjectDirs;
 use ncts::NctsClient;
@@ -67,6 +71,12 @@ pub fn run() {
             get_local_latest,
             get_local_versions,
             get_all_local_latest,
+            import_terminology,
+            search_terminology,
+            lookup_code,
+            expand_valueset,
+            validate_code,
+            list_valuesets,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

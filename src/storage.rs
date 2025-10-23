@@ -44,6 +44,10 @@ pub struct TerminologyVersion {
     pub content_item_version: Option<String>,
     pub sha256_hash: Option<String>,
     pub sct_base_version: Option<String>,
+    // Import tracking
+    pub imported: bool,
+    #[serde(with = "chrono::serde::ts_seconds_option")]
+    pub imported_at: Option<DateTime<Utc>>,
 }
 
 // Custom implementation to parse from SQLite string fields
@@ -53,6 +57,7 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for TerminologyVersion {
 
         let downloaded_at: Option<String> = row.try_get("downloaded_at")?;
         let created_at: String = row.try_get("created_at")?;
+        let imported_at: Option<String> = row.try_get("imported_at").ok().flatten();
 
         Ok(Self {
             id: row.try_get("id")?,
@@ -70,6 +75,8 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for TerminologyVersion {
             content_item_version: row.try_get("content_item_version").ok(),
             sha256_hash: row.try_get("sha256_hash").ok(),
             sct_base_version: row.try_get("sct_base_version").ok(),
+            imported: row.try_get("imported").unwrap_or(false),
+            imported_at: imported_at.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
         })
     }
 }
@@ -103,6 +110,7 @@ impl TerminologyStorage {
 
     /// Run database migrations
     async fn run_migrations(&self) -> Result<(), StorageError> {
+        // Terminology versions metadata table
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS terminology_versions (
@@ -119,6 +127,8 @@ impl TerminologyStorage {
                 content_item_version TEXT,
                 sha256_hash TEXT,
                 sct_base_version TEXT,
+                imported BOOLEAN NOT NULL DEFAULT 0,
+                imported_at TEXT,
                 UNIQUE(terminology_type, version)
             )
             "#,
@@ -139,6 +149,300 @@ impl TerminologyStorage {
             r#"
             CREATE INDEX IF NOT EXISTS idx_is_latest
             ON terminology_versions(is_latest)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // SNOMED CT-AU tables (RF2 SNAPSHOT format)
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS snomed_concepts (
+                id TEXT PRIMARY KEY,
+                effective_time TEXT NOT NULL,
+                active INTEGER NOT NULL,
+                module_id TEXT NOT NULL,
+                definition_status_id TEXT NOT NULL,
+                version_id INTEGER NOT NULL,
+                FOREIGN KEY (version_id) REFERENCES terminology_versions(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_snomed_concepts_active
+            ON snomed_concepts(active)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_snomed_concepts_version
+            ON snomed_concepts(version_id)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS snomed_descriptions (
+                id TEXT PRIMARY KEY,
+                effective_time TEXT NOT NULL,
+                active INTEGER NOT NULL,
+                module_id TEXT NOT NULL,
+                concept_id TEXT NOT NULL,
+                language_code TEXT NOT NULL,
+                type_id TEXT NOT NULL,
+                term TEXT NOT NULL,
+                case_significance_id TEXT NOT NULL,
+                version_id INTEGER NOT NULL,
+                FOREIGN KEY (concept_id) REFERENCES snomed_concepts(id) ON DELETE CASCADE,
+                FOREIGN KEY (version_id) REFERENCES terminology_versions(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_snomed_descriptions_concept
+            ON snomed_descriptions(concept_id)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_snomed_descriptions_active
+            ON snomed_descriptions(active)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_snomed_descriptions_type
+            ON snomed_descriptions(type_id)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_snomed_descriptions_term
+            ON snomed_descriptions(term)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS snomed_relationships (
+                id TEXT PRIMARY KEY,
+                effective_time TEXT NOT NULL,
+                active INTEGER NOT NULL,
+                module_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                destination_id TEXT NOT NULL,
+                relationship_group INTEGER NOT NULL,
+                type_id TEXT NOT NULL,
+                characteristic_type_id TEXT NOT NULL,
+                modifier_id TEXT NOT NULL,
+                version_id INTEGER NOT NULL,
+                FOREIGN KEY (source_id) REFERENCES snomed_concepts(id) ON DELETE CASCADE,
+                FOREIGN KEY (destination_id) REFERENCES snomed_concepts(id) ON DELETE CASCADE,
+                FOREIGN KEY (version_id) REFERENCES terminology_versions(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_snomed_relationships_source
+            ON snomed_relationships(source_id)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_snomed_relationships_destination
+            ON snomed_relationships(destination_id)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_snomed_relationships_type
+            ON snomed_relationships(type_id)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_snomed_relationships_active
+            ON snomed_relationships(active)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // AMT (Australian Medicines Terminology) tables - CSV format
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS amt_codes (
+                id TEXT PRIMARY KEY,
+                preferred_term TEXT NOT NULL,
+                code_type TEXT NOT NULL,
+                parent_code TEXT,
+                properties TEXT,
+                version_id INTEGER NOT NULL,
+                FOREIGN KEY (version_id) REFERENCES terminology_versions(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_amt_codes_version
+            ON amt_codes(version_id)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_amt_codes_type
+            ON amt_codes(code_type)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_amt_codes_term
+            ON amt_codes(preferred_term)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_amt_codes_parent
+            ON amt_codes(parent_code)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // FHIR R4 ValueSet tables - for ValueSet expansion and code validation
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS valuesets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL UNIQUE,
+                version TEXT,
+                name TEXT,
+                title TEXT,
+                status TEXT,
+                description TEXT,
+                publisher TEXT,
+                version_id INTEGER NOT NULL,
+                FOREIGN KEY (version_id) REFERENCES terminology_versions(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_valuesets_url
+            ON valuesets(url)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_valuesets_version_id
+            ON valuesets(version_id)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS valueset_concepts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                valueset_id INTEGER NOT NULL,
+                system TEXT NOT NULL,
+                code TEXT NOT NULL,
+                display TEXT,
+                FOREIGN KEY (valueset_id) REFERENCES valuesets(id) ON DELETE CASCADE,
+                UNIQUE(valueset_id, system, code)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_valueset_concepts_valueset
+            ON valueset_concepts(valueset_id)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_valueset_concepts_code
+            ON valueset_concepts(code)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_valueset_concepts_system
+            ON valueset_concepts(system)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_valueset_concepts_lookup
+            ON valueset_concepts(valueset_id, system, code)
             "#,
         )
         .execute(&self.pool)
@@ -255,7 +559,8 @@ impl TerminologyStorage {
             r#"
             SELECT id, terminology_type, version, effective_date,
                    download_url, file_path, downloaded_at, is_latest, created_at,
-                   content_item_identifier, content_item_version, sha256_hash, sct_base_version
+                   content_item_identifier, content_item_version, sha256_hash, sct_base_version,
+                   imported, imported_at
             FROM terminology_versions
             WHERE terminology_type = ? AND is_latest = 1
             LIMIT 1
@@ -277,7 +582,8 @@ impl TerminologyStorage {
             r#"
             SELECT id, terminology_type, version, effective_date,
                    download_url, file_path, downloaded_at, is_latest, created_at,
-                   content_item_identifier, content_item_version, sha256_hash, sct_base_version
+                   content_item_identifier, content_item_version, sha256_hash, sct_base_version,
+                   imported, imported_at
             FROM terminology_versions
             WHERE terminology_type = ?
             ORDER BY created_at DESC
@@ -296,7 +602,8 @@ impl TerminologyStorage {
             r#"
             SELECT id, terminology_type, version, effective_date,
                    download_url, file_path, downloaded_at, is_latest, created_at,
-                   content_item_identifier, content_item_version, sha256_hash, sct_base_version
+                   content_item_identifier, content_item_version, sha256_hash, sct_base_version,
+                   imported, imported_at
             FROM terminology_versions
             WHERE is_latest = 1
             ORDER BY terminology_type
@@ -308,9 +615,31 @@ impl TerminologyStorage {
         Ok(results)
     }
 
+    /// Mark a version as imported
+    pub async fn mark_imported(&self, id: i64) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            UPDATE terminology_versions
+            SET imported = 1, imported_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     /// Get the data directory path for storing downloaded files
     pub fn data_dir(&self) -> &PathBuf {
         &self.data_dir
+    }
+
+    /// Get access to the database pool for import operations
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     /// Generate a file path for a terminology download

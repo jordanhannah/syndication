@@ -21,6 +21,7 @@ dotenvy = "0.15"
 sha2 = "0.10"
 quick-xml = "0.37"
 hex = "0.4"
+zip = "2.2"
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }
