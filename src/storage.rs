@@ -642,9 +642,42 @@ impl TerminologyStorage {
         &self.pool
     }
 
+    /// Sanitize a version string to make it safe for use in filenames
+    /// Replaces spaces with underscores and removes/replaces problematic characters
+    fn sanitize_version_for_filename(version: &str) -> String {
+        version
+            .replace(' ', "_")
+            .replace('/', "-")
+            .replace('\\', "-")
+            .replace('(', "")
+            .replace(')', "")
+            .replace('[', "")
+            .replace(']', "")
+            .replace('{', "")
+            .replace('}', "")
+            .replace(':', "-")
+            .replace('*', "")
+            .replace('?', "")
+            .replace('"', "")
+            .replace('<', "")
+            .replace('>', "")
+            .replace('|', "-")
+    }
+
     /// Generate a file path for a terminology download
     pub fn generate_file_path(&self, terminology_type: &str, version: &str) -> PathBuf {
-        let filename = format!("{}_{}.zip", terminology_type, version);
+        // Sanitize version string to ensure valid filename
+        let safe_version = Self::sanitize_version_for_filename(version);
+
+        // Determine the correct file extension based on terminology type
+        let extension = match terminology_type {
+            "snomed" => "zip",     // SNOMED RF2 SNAPSHOT is a ZIP archive
+            "amt" => "csv",        // AMT is in CSV format
+            "valuesets" => "json", // FHIR R4 ValueSet Bundles are JSON
+            "loinc" => "zip",      // LOINC (not used, but would be ZIP)
+            _ => "zip",            // Default to ZIP for unknown types
+        };
+        let filename = format!("{}_{}.{}", terminology_type, safe_version, extension);
         self.data_dir.join(filename)
     }
 }
