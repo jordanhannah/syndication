@@ -54,6 +54,7 @@ pub async fn sync_terminology(
     terminology_type: String,
     state: State<'_, AppState>,
 ) -> Result<SyncResult, String> {
+    println!("🔵 sync_terminology called for: {}", terminology_type);
     let term_type = parse_terminology_type(&terminology_type)?;
 
     // Fetch the latest version from NCTS

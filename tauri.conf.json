@@ -29,7 +29,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' https://www.healthterminologies.gov.au https://tx.fhir.org"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' ipc://localhost https://api.healthterminologies.gov.au https://tx.fhir.org"
     }
   }
 }
