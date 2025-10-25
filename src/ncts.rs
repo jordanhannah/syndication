@@ -6,12 +6,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// NCTS API base URL and syndication endpoint
-pub const NCTS_BASE_URL: &str = "https://api.healthterminologies.gov.au";
+/// NCTS syndication endpoint
 pub const SYNDICATION_FEED_URL: &str = "https://api.healthterminologies.gov.au/syndication/v1/syndication.xml";
-
-/// NCTS XML namespace for extension elements
-pub const NCTS_NAMESPACE: &str = "http://ns.electronichealth.net.au/ncts/syndication/asf/extensions/1.0.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TerminologyType {
@@ -35,14 +31,6 @@ impl TerminologyType {
     /// Checks if an Atom entry category matches this terminology type
     pub fn matches_category(&self, category_term: &str) -> bool {
         self.category_terms().contains(&category_term)
-    }
-
-    /// Checks if this terminology type is available via syndication feed
-    pub fn is_available(&self) -> bool {
-        match self {
-            TerminologyType::Loinc => false, // LOINC only available as proprietary binary
-            _ => true,
-        }
     }
 
     pub fn display_name(&self) -> &str {
@@ -375,13 +363,5 @@ mod tests {
         // Other types don't filter by title
         assert!(TerminologyType::Snomed.matches_title("Any Title"));
         assert!(TerminologyType::Amt.matches_title("Any Title"));
-    }
-
-    #[test]
-    fn test_availability() {
-        assert!(TerminologyType::Snomed.is_available());
-        assert!(TerminologyType::Amt.is_available());
-        assert!(TerminologyType::ValueSets.is_available());
-        assert!(!TerminologyType::Loinc.is_available());
     }
 }

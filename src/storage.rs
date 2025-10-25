@@ -10,8 +10,6 @@ pub enum StorageError {
     Database(String),
     #[error("IO error: {0}")]
     Io(String),
-    #[error("Migration error: {0}")]
-    Migration(String),
 }
 
 impl From<sqlx::Error> for StorageError {
@@ -630,11 +628,6 @@ impl TerminologyStorage {
         .await?;
 
         Ok(())
-    }
-
-    /// Get the data directory path for storing downloaded files
-    pub fn data_dir(&self) -> &PathBuf {
-        &self.data_dir
     }
 
     /// Get access to the database pool for import operations

@@ -153,11 +153,6 @@ impl ValueSetR4Parser {
         }
     }
 
-    /// Helper to parse compose section for ValueSets without expansion
-    /// This extracts the include filters which can be used for dynamic expansion
-    pub fn has_compose(resource: &Value) -> bool {
-        resource.get("compose").is_some()
-    }
 }
 
 #[cfg(test)]
