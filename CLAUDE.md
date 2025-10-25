@@ -514,6 +514,226 @@ This app now serves as a **complete desktop terminology backend** for FHIR appli
 - Synonym lookup for display enhancement
 - Local terminology browsing without API calls
 
+## Future Project Goals: Offline Patient-Doctor Questionnaires (OPDQ)
+
+**Vision**: Extend this app to support privacy-preserving, air-gapped clinical questionnaires using QR code exchange.
+
+### OPDQ System Overview
+
+The planned OPDQ feature will enable secure questionnaire workflows between doctors and patients without network transmission:
+
+**Two-Way QR Exchange:**
+1. **Doctor → Patient**: QR code contains questionnaire definition + doctor's public encryption key
+2. **Patient → Doctor**: Animated BC-UR QR sequence with encrypted responses
+
+**Key Design Principles:**
+- **Zero Network Transfer**: Complete air-gap architecture using visual QR codes only
+- **End-to-End Encryption**: RSA/AES hybrid encryption (responses encrypted with doctor's public key)
+- **BC-UR Animated QR**: All responses use fountain-coded multi-frame QR (handles 1KB-100KB+ payloads)
+- **HIPAA Compliance**: No pre-shared secrets, patient controls sharing, ephemeral session keys
+- **Platform Support**: Web version (SolidJS + IndexedDB) and Desktop version (Tauri + SQLCipher)
+
+### Architecture Plans
+
+**Frontend (Shared - SolidJS):**
+- `BCURScanner.tsx` - Multi-frame QR scanner using qr-scanner library
+- `BCURGenerator.tsx` - Rotating animated QR display (10-15 FPS)
+- `QuestionnaireForm.tsx` - Patient questionnaire UI with validation
+- `ResponseViewer.tsx` - Clinician response viewer
+- Web Crypto API for all cryptographic operations (RSA-OAEP-4096, AES-256-GCM)
+
+**Backend (Desktop Only - Rust/Tauri):**
+- SQLCipher for encrypted storage of patient responses
+- Questionnaire templates bundled at compile-time
+- Integration with existing NCTS terminology for ValueSet-driven questions
+- Automatic data deletion after viewing/exporting responses
+
+**Web Version Differences:**
+- Questionnaires downloaded from Azure on-demand
+- IndexedDB for temporary session storage
+- Same SolidJS components and Web Crypto API
+
+### Planned Database Extensions
+
+**Doctor's Device (Desktop):**
+```sql
+CREATE TABLE questionnaire_sessions (
+    id TEXT PRIMARY KEY,
+    questionnaire_id TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    private_key_ref TEXT NOT NULL,  -- OS keychain reference
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    status TEXT DEFAULT 'pending'   -- pending, completed, expired
+);
+
+CREATE TABLE patient_responses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    questionnaire_id TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    encrypted_responses BLOB NOT NULL,  -- Double-encrypted
+    encryption_nonce BLOB NOT NULL,
+    clinician_id TEXT NOT NULL,
+    viewed BOOLEAN DEFAULT 0,
+    exported BOOLEAN DEFAULT 0,
+    FOREIGN KEY (session_id) REFERENCES questionnaire_sessions(id)
+);
+
+CREATE TABLE questionnaires (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    version TEXT NOT NULL,
+    definition TEXT NOT NULL,  -- JSON questionnaire schema
+    created_at TEXT NOT NULL,
+    active BOOLEAN DEFAULT 1
+);
+```
+
+**Patient's Device (Web/Mobile):**
+```sql
+CREATE TABLE active_sessions (
+    id TEXT PRIMARY KEY,
+    questionnaire_id TEXT NOT NULL,
+    doctor_name TEXT,
+    doctor_public_key TEXT NOT NULL,
+    scanned_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    questionnaire_data TEXT NOT NULL  -- JSON definition
+);
+```
+
+### Performance Characteristics
+
+**BC-UR Animated QR (qr-scanner library):**
+- Small questionnaires (~1KB): 1 frame, ~100ms scan time
+- Medium questionnaires (~3KB): 2 frames, ~200ms scan time
+- Large questionnaires (~10KB): 6 frames, ~600ms scan time
+- Frame rate: 10-15 FPS for reliable scanning
+- Throughput: ~25 kbps
+- Fountain coding: Stateless, missing-frame tolerant
+
+**Why BC-UR Only (No Single QR Mode):**
+- Eliminates format selection logic
+- Single code path for all payload sizes
+- Minimal overhead for small payloads (~50ms extra vs static QR)
+- Handles complex questionnaires without modification
+
+### Technology Stack (Additional)
+
+**JavaScript/TypeScript Dependencies:**
+```json
+{
+  "dependencies": {
+    "solid-js": "^1.8.0",
+    "qr-scanner": "^1.4.2",
+    "qrcode": "^1.5.3",
+    "@ngraveio/bc-ur": "^1.1.12",
+    "uuid": "^10.0.0"
+  }
+}
+```
+
+**Rust Dependencies (Desktop Only):**
+```toml
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher"] }
+keyring = "3.8"  # OS keychain integration
+```
+
+### Integration with Current System
+
+The OPDQ feature will leverage existing terminology infrastructure:
+
+1. **ValueSet-Driven Questions**: Use `expand_valueset()` and `validate_code()` commands for questionnaire answer options
+2. **Code Search**: `search_terminology()` for autocomplete in questionnaire builders
+3. **Offline Validation**: All terminology lookups happen locally using imported SNOMED/AMT data
+4. **Shared Storage**: Separate SQLite database for OPDQ data, same directory structure
+
+**Example Integration:**
+```javascript
+// Questionnaire uses ValueSet for answer options
+const diabetesScreening = {
+  questions: [{
+    id: "diagnosis",
+    text: "Primary diagnosis?",
+    type: "valueset",
+    valuesetUrl: "http://healthterminologies.gov.au/fhir/ValueSet/diabetes-conditions",
+  }]
+};
+
+// Expand ValueSet to get answer options (offline)
+const options = await invoke("expand_valueset", {
+  valuesetUrl: diabetesScreening.questions[0].valuesetUrl
+});
+
+// Generate QR with questionnaire + options
+const qrPayload = {
+  questionnaire: diabetesScreening,
+  answerOptions: options.concepts,
+  doctorPublicKey: sessionKey
+};
+```
+
+### Security & Privacy (OPDQ-Specific)
+
+- **Encryption**: RSA-OAEP-4096 for key exchange, AES-256-GCM for payload
+- **Key Storage**: OS keychain for private keys (macOS Keychain, Windows Credential Manager, Linux Secret Service)
+- **Data at Rest**: SQLCipher encryption for all patient responses on disk
+- **Ephemeral Sessions**: 1-hour session expiry, automatic cleanup
+- **Audit Trail**: All access logged (received, viewed, exported, deleted)
+- **No PHI Transmission**: Zero network activity during questionnaire exchange
+- **Patient Consent**: Visual confirmation before scanning doctor's QR
+
+### Implementation Roadmap
+
+**Phase 1**: Core OPDQ Infrastructure (Desktop)
+- [ ] BC-UR QR scanner/generator components (SolidJS)
+- [ ] Web Crypto API wrapper for hybrid encryption
+- [ ] SQLCipher integration for desktop app
+- [ ] Questionnaire session management
+- [ ] Basic questionnaire templates
+
+**Phase 2**: Integration with Terminology
+- [ ] ValueSet-driven question types
+- [ ] Code validation in questionnaire responses
+- [ ] Autocomplete using local terminology search
+- [ ] Questionnaire builder UI
+
+**Phase 3**: Web Version
+- [ ] IndexedDB persistence layer
+- [ ] Azure questionnaire repository
+- [ ] Progressive Web App (PWA) support
+- [ ] Mobile-optimized UI
+
+**Phase 4**: Advanced Features
+- [ ] Complex question logic (conditional display)
+- [ ] Multi-page questionnaires
+- [ ] Response export formats (FHIR Questionnaire Response)
+- [ ] Questionnaire version management
+
+### Development Considerations
+
+**Code Sharing Strategy:**
+- 100% shared SolidJS components between web and desktop
+- 100% shared Web Crypto API code
+- Platform-specific: Storage layer only (IndexedDB vs Tauri commands)
+- Desktop-only: NCTS sync remains separate module
+
+**Testing Strategy:**
+- Test questionnaire flow with smallest payload first (~1KB, 1 frame)
+- Progress to medium (~3KB, 2 frames) and large (~10KB, 6 frames)
+- Verify encryption/decryption round-trip
+- Test session expiry and cleanup
+- Validate BC-UR frame reconstruction with missing frames
+
+**Dependencies on Current System:**
+- Existing NCTS terminology data provides foundation for questionnaires
+- ValueSet expansion enables standardized answer options
+- Code validation ensures questionnaire responses use valid codes
+- Storage patterns (SQLite, directory structure) remain consistent
+
+See **[OPDQs.md](OPDQs.md)** for complete OPDQ technical specification.
+
 ## Terminology-Specific Notes
 
 ### Supported Terminologies
