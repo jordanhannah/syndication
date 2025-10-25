@@ -2,6 +2,7 @@ use crate::parsers::{AmtCsvParser, SnomedRf2Parser, ValueSetR4Parser};
 use crate::storage::TerminologyStorage;
 use anyhow::{Context, Result};
 use sqlx::SqlitePool;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
@@ -45,7 +46,10 @@ impl<'a> TerminologyImporter<'a> {
         // Import concepts with batch inserts
         println!("Importing concepts...");
         let mut concept_batch = Vec::new();
-        let concept_count = SnomedRf2Parser::parse_concepts(&concept_file, |concept| {
+        let concept_file_handle = std::fs::File::open(&concept_file)
+            .context("Failed to open concepts file")?;
+        let concept_reader = BufReader::new(concept_file_handle);
+        let concept_count = SnomedRf2Parser::parse_concepts(concept_reader, |concept| {
             concept_batch.push(concept);
 
             // Batch insert every 1000 records
@@ -70,8 +74,11 @@ impl<'a> TerminologyImporter<'a> {
         // Import descriptions with batch inserts
         println!("Importing descriptions...");
         let mut description_batch = Vec::new();
+        let description_file_handle = std::fs::File::open(&description_file)
+            .context("Failed to open descriptions file")?;
+        let description_reader = BufReader::new(description_file_handle);
         let description_count =
-            SnomedRf2Parser::parse_descriptions(&description_file, |description| {
+            SnomedRf2Parser::parse_descriptions(description_reader, |description| {
                 description_batch.push(description);
 
                 // Batch insert every 1000 records
@@ -97,8 +104,11 @@ impl<'a> TerminologyImporter<'a> {
         // Import relationships with batch inserts
         println!("Importing relationships...");
         let mut relationship_batch = Vec::new();
+        let relationship_file_handle = std::fs::File::open(&relationship_file)
+            .context("Failed to open relationships file")?;
+        let relationship_reader = BufReader::new(relationship_file_handle);
         let relationship_count =
-            SnomedRf2Parser::parse_relationships(&relationship_file, |relationship| {
+            SnomedRf2Parser::parse_relationships(relationship_reader, |relationship| {
                 relationship_batch.push(relationship);
 
                 // Batch insert every 1000 records

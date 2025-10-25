@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::io::BufRead;
 
 /// SNOMED CT Concept (from Concept_Snapshot file)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,14 +44,11 @@ pub struct SnomedRelationship {
 pub struct SnomedRf2Parser;
 
 impl SnomedRf2Parser {
-    /// Parse SNOMED CT Concepts from a TSV file
-    pub fn parse_concepts<P: AsRef<Path>, F>(path: P, mut callback: F) -> Result<usize>
+    /// Parse SNOMED CT Concepts from a TSV reader
+    pub fn parse_concepts<R: BufRead, F>(reader: R, mut callback: F) -> Result<usize>
     where
         F: FnMut(SnomedConcept) -> Result<()>,
     {
-        let file = std::fs::File::open(path.as_ref())
-            .context("Failed to open concepts file")?;
-        let reader = BufReader::new(file);
         let mut lines = reader.lines();
 
         // Skip header line
@@ -86,14 +82,11 @@ impl SnomedRf2Parser {
         Ok(count)
     }
 
-    /// Parse SNOMED CT Descriptions from a TSV file
-    pub fn parse_descriptions<P: AsRef<Path>, F>(path: P, mut callback: F) -> Result<usize>
+    /// Parse SNOMED CT Descriptions from a TSV reader
+    pub fn parse_descriptions<R: BufRead, F>(reader: R, mut callback: F) -> Result<usize>
     where
         F: FnMut(SnomedDescription) -> Result<()>,
     {
-        let file = std::fs::File::open(path.as_ref())
-            .context("Failed to open descriptions file")?;
-        let reader = BufReader::new(file);
         let mut lines = reader.lines();
 
         // Skip header line
@@ -131,14 +124,11 @@ impl SnomedRf2Parser {
         Ok(count)
     }
 
-    /// Parse SNOMED CT Relationships from a TSV file
-    pub fn parse_relationships<P: AsRef<Path>, F>(path: P, mut callback: F) -> Result<usize>
+    /// Parse SNOMED CT Relationships from a TSV reader
+    pub fn parse_relationships<R: BufRead, F>(reader: R, mut callback: F) -> Result<usize>
     where
         F: FnMut(SnomedRelationship) -> Result<()>,
     {
-        let file = std::fs::File::open(path.as_ref())
-            .context("Failed to open relationships file")?;
-        let reader = BufReader::new(file);
         let mut lines = reader.lines();
 
         // Skip header line
@@ -188,9 +178,10 @@ mod tests {
         let test_data = "id\teffectiveTime\tactive\tmoduleId\tdefinitionStatusId\n\
                          12345\t20230101\t1\t67890\t900000000000074008";
 
+        let reader = std::io::BufReader::new(test_data.as_bytes());
         let mut count = 0;
         let result = SnomedRf2Parser::parse_concepts(
-            test_data.as_bytes(),
+            reader,
             |concept| {
                 assert_eq!(concept.id, "12345");
                 assert_eq!(concept.effective_time, "20230101");
@@ -201,5 +192,6 @@ mod tests {
         );
 
         assert!(result.is_ok());
+        assert_eq!(count, 1);
     }
 }
