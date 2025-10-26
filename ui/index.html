@@ -15,6 +15,7 @@
             <button id="testConnection" class="test-connection-btn">Test NCTS Connection</button>
             <button id="syncAll">Sync All Terminologies</button>
             <button id="refreshStatus">Refresh Status</button>
+            <button id="cleanupGhosts" title="Clean up ghost version records (versions with timestamps but no files)">Cleanup Database</button>
             <div id="connectionStatus" class="connection-status hidden"></div>
         </div>
 
@@ -40,30 +41,37 @@
             <!-- Terminology cards will be inserted here -->
         </div>
 
-        <div class="stats-panel" id="statsPanel">
-            <h2>Storage Statistics</h2>
-            <div class="stats-grid" id="statsGrid">
-                <div class="stat-card">
-                    <span class="stat-label">Database Size</span>
-                    <span class="stat-value" id="statDatabaseSize">-</span>
+        <div class="storage-panel" id="storagePanel">
+            <h2>Storage Management</h2>
+            <div class="storage-summary">
+                <div class="summary-item">
+                    <span class="summary-label">Total Files:</span>
+                    <span class="summary-value" id="summaryTotalFiles">-</span>
                 </div>
-                <div class="stat-card">
-                    <span class="stat-label">SNOMED Concepts</span>
-                    <span class="stat-value" id="statSnomedConcepts">-</span>
+                <div class="summary-item">
+                    <span class="summary-label">Total Database:</span>
+                    <span class="summary-value" id="summaryTotalDb">-</span>
                 </div>
-                <div class="stat-card">
-                    <span class="stat-label">SNOMED Descriptions</span>
-                    <span class="stat-value" id="statSnomedDescriptions">-</span>
-                </div>
-                <div class="stat-card">
-                    <span class="stat-label">AMT Codes</span>
-                    <span class="stat-value" id="statAmtCodes">-</span>
-                </div>
-                <div class="stat-card">
-                    <span class="stat-label">Value Sets</span>
-                    <span class="stat-value" id="statValueSets">-</span>
+                <div class="summary-item">
+                    <span class="summary-label">Total Storage:</span>
+                    <span class="summary-value" id="summaryTotal">-</span>
                 </div>
             </div>
+            <table class="storage-table" id="storageTable">
+                <thead>
+                    <tr>
+                        <th>Terminology</th>
+                        <th>Downloaded File</th>
+                        <th>Database</th>
+                        <th>Records</th>
+                        <th>Total</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="storageTableBody">
+                    <tr><td colspan="6" class="loading-text">Loading storage info...</td></tr>
+                </tbody>
+            </table>
         </div>
 
         <div class="valueset-browser">
@@ -92,6 +100,22 @@
         </div>
     </div>
 
+    <!-- Custom Confirmation Modal -->
+    <div id="confirmModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle">Confirm Action</h3>
+            </div>
+            <div class="modal-body">
+                <p id="modalMessage"></p>
+            </div>
+            <div class="modal-footer">
+                <button id="modalCancel" class="modal-btn modal-btn-cancel">Cancel</button>
+                <button id="modalConfirm" class="modal-btn modal-btn-confirm">Confirm</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         const { invoke } = window.__TAURI__.core;
 
@@ -103,6 +127,40 @@
         ];
 
         let statusData = {};
+
+        // Custom confirmation dialog function
+        function showConfirmDialog(title, message) {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('confirmModal');
+                const modalTitle = document.getElementById('modalTitle');
+                const modalMessage = document.getElementById('modalMessage');
+                const confirmBtn = document.getElementById('modalConfirm');
+                const cancelBtn = document.getElementById('modalCancel');
+
+                modalTitle.textContent = title;
+                modalMessage.textContent = message;
+                modal.classList.remove('hidden');
+
+                function cleanup() {
+                    modal.classList.add('hidden');
+                    confirmBtn.removeEventListener('click', onConfirm);
+                    cancelBtn.removeEventListener('click', onCancel);
+                }
+
+                function onConfirm() {
+                    cleanup();
+                    resolve(true);
+                }
+
+                function onCancel() {
+                    cleanup();
+                    resolve(false);
+                }
+
+                confirmBtn.addEventListener('click', onConfirm);
+                cancelBtn.addEventListener('click', onCancel);
+            });
+        }
 
         function log(message, type = 'info') {
             const logEntries = document.getElementById('logEntries');
@@ -336,7 +394,7 @@
                 }
 
                 await refreshStatus();
-                await refreshStats();
+                await refreshStorageInfo();
             } catch (error) {
                 // Clean up listener
                 if (importProgressListener) {
@@ -440,17 +498,376 @@
             log(`Found ${results.length} results`, 'success');
         }
 
-        async function refreshStats() {
-            try {
-                const stats = await invoke('get_storage_stats');
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
+        }
 
-                document.getElementById('statDatabaseSize').textContent = stats.database_size_mb.toFixed(1) + ' MB';
-                document.getElementById('statSnomedConcepts').textContent = stats.snomed_concepts.toLocaleString();
-                document.getElementById('statSnomedDescriptions').textContent = stats.snomed_descriptions.toLocaleString();
-                document.getElementById('statAmtCodes').textContent = stats.amt_codes.toLocaleString();
-                document.getElementById('statValueSets').textContent = stats.valuesets.toLocaleString();
+        function getTerminologyDisplayName(type) {
+            const names = {
+                'snomed': 'SNOMED CT-AU',
+                'amt': 'AMT',
+                'valuesets': 'Value Sets'
+            };
+            return names[type] || type;
+        }
+
+        async function refreshStorageInfo() {
+            try {
+                const breakdown = await invoke('get_detailed_storage_info');
+
+                // Update summary
+                document.getElementById('summaryTotalFiles').textContent = formatBytes(breakdown.total_file_size_bytes);
+                document.getElementById('summaryTotalDb').textContent = formatBytes(breakdown.total_database_size_bytes);
+                document.getElementById('summaryTotal').textContent = formatBytes(breakdown.total_size_bytes);
+
+                // Build table rows
+                const tbody = document.getElementById('storageTableBody');
+                tbody.innerHTML = '';
+
+                for (const term of breakdown.terminologies) {
+                    const row = document.createElement('tr');
+
+                    const fileStatus = term.has_file
+                        ? `<span class="status-badge has-data">${formatBytes(term.file_size_bytes)}</span>`
+                        : `<span class="status-badge no-data">Not downloaded</span>`;
+
+                    const dbStatus = term.has_database_data
+                        ? `<span class="status-badge has-data">${formatBytes(term.database_size_estimate_bytes)}</span>`
+                        : `<span class="status-badge no-data">Not imported</span>`;
+
+                    row.innerHTML = `
+                        <td><strong>${getTerminologyDisplayName(term.terminology_type)}</strong></td>
+                        <td>${fileStatus}</td>
+                        <td>${dbStatus}</td>
+                        <td>${term.database_records.toLocaleString()}</td>
+                        <td><strong>${formatBytes(term.total_size_bytes)}</strong></td>
+                        <td class="storage-actions">
+                            ${term.has_file ? `
+                                <button class="delete-btn delete-file"
+                                        data-type="${term.terminology_type}"
+                                        title="Delete downloaded file">
+                                    🗑️ File
+                                </button>
+                            ` : ''}
+                            ${term.has_database_data ? `
+                                <button class="delete-btn delete-data"
+                                        data-type="${term.terminology_type}"
+                                        title="Delete database records">
+                                    🗑️ Data
+                                </button>
+                            ` : ''}
+                            ${term.has_file || term.has_database_data ? `
+                                <button class="delete-btn delete-all"
+                                        data-type="${term.terminology_type}"
+                                        title="Delete everything">
+                                    🗑️ All
+                                </button>
+                            ` : ''}
+                        </td>
+                    `;
+
+                    tbody.appendChild(row);
+                }
+
             } catch (error) {
-                console.error('Failed to refresh stats:', error);
+                console.error('Failed to refresh storage info:', error);
+                log('Failed to refresh storage info: ' + error, 'error');
+            }
+        }
+
+        async function deleteFile(terminologyType) {
+            console.log('deleteFile called with:', terminologyType);
+            const termName = getTerminologyDisplayName(terminologyType);
+            console.log('Term name:', termName);
+
+            const confirmed = await showConfirmDialog(
+                'Confirm File Deletion',
+                `Delete downloaded file for ${termName}?\n\nThis will free up disk space but keep the imported database records. You can re-download the file later if needed.`
+            );
+
+            if (!confirmed) {
+                console.log('User cancelled deletion');
+                return;
+            }
+            console.log('User confirmed deletion, proceeding...');
+
+            try {
+                const result = await invoke('delete_terminology_file', { terminologyType });
+                log(`✓ ${result}`, 'success');
+                await refreshStorageInfo();
+                await refreshStatus();
+            } catch (error) {
+                log(`✗ Failed to delete file: ${error}`, 'error');
+            }
+        }
+
+        let deleteProgressListener = null;
+
+        async function deleteData(terminologyType) {
+            console.log('deleteData called with:', terminologyType);
+            const termName = getTerminologyDisplayName(terminologyType);
+
+            const confirmed = await showConfirmDialog(
+                'Confirm Data Deletion',
+                `Delete database records for ${termName}?\n\nThis will remove all imported terminology data. The downloaded file will be kept. You'll need to re-import to use search and lookup features.`
+            );
+
+            if (!confirmed) {
+                console.log('User cancelled deletion');
+                return;
+            }
+            console.log('User confirmed deletion, proceeding...');
+
+            // Find the row in the storage table
+            const tbody = document.getElementById('storageTableBody');
+            const rows = tbody.querySelectorAll('tr');
+            let targetRow = null;
+
+            rows.forEach(row => {
+                const deleteBtn = row.querySelector(`[data-type="${terminologyType}"]`);
+                if (deleteBtn) {
+                    targetRow = row;
+                }
+            });
+
+            if (targetRow) {
+                // Store original content
+                const originalContent = targetRow.innerHTML;
+
+                // Create progress UI
+                targetRow.innerHTML = `
+                    <td colspan="6">
+                        <div class="delete-progress-multi">
+                            <div class="phase-item pending" data-phase="Starting">
+                                <span class="phase-icon"></span>
+                                <span class="phase-label">Starting</span>
+                            </div>
+                            <div class="phase-item pending" data-phase="Counting">
+                                <span class="phase-icon"></span>
+                                <span class="phase-label">Counting</span>
+                            </div>
+                            <div class="phase-item pending" data-phase="Deleting">
+                                <span class="phase-icon"></span>
+                                <span class="phase-label">Deleting</span>
+                            </div>
+                            <div class="phase-item pending" data-phase="Updating">
+                                <span class="phase-icon"></span>
+                                <span class="phase-label">Updating</span>
+                            </div>
+                            <div class="phase-item pending" data-phase="Complete">
+                                <span class="phase-icon"></span>
+                                <span class="phase-label">Complete</span>
+                            </div>
+                        </div>
+                    </td>
+                `;
+
+                // Listen for delete progress events
+                if (deleteProgressListener) {
+                    deleteProgressListener();
+                }
+
+                deleteProgressListener = await window.__TAURI__.event.listen('delete-progress', (event) => {
+                    const progress = event.payload;
+                    const phaseItems = targetRow.querySelectorAll('.phase-item');
+
+                    phaseItems.forEach(item => {
+                        const phaseName = item.getAttribute('data-phase');
+                        const icon = item.querySelector('.phase-icon');
+                        const label = item.querySelector('.phase-label');
+
+                        if (phaseName === progress.phase) {
+                            icon.textContent = '✓';
+                            item.classList.remove('pending', 'completed');
+                            item.classList.add('in-progress');
+
+                            // Update label with message if it's the deletion phase
+                            if (progress.phase === 'Deleting' && progress.message) {
+                                label.textContent = progress.message;
+                            }
+                        } else {
+                            // Check if this phase is before the current phase
+                            const currentPhaseIndex = Array.from(phaseItems).findIndex(p => p.getAttribute('data-phase') === progress.phase);
+                            const thisPhaseIndex = Array.from(phaseItems).indexOf(item);
+
+                            if (thisPhaseIndex < currentPhaseIndex) {
+                                icon.textContent = '✓';
+                                item.classList.remove('pending', 'in-progress');
+                                item.classList.add('completed');
+                            }
+                        }
+                    });
+                });
+
+                try {
+                    const result = await invoke('delete_terminology_data', { terminologyType });
+
+                    // Clean up listener
+                    if (deleteProgressListener) {
+                        deleteProgressListener();
+                        deleteProgressListener = null;
+                    }
+
+                    log(`✓ ${result}`, 'success');
+                    await refreshStorageInfo();
+                    await refreshStatus();
+                } catch (error) {
+                    // Clean up listener
+                    if (deleteProgressListener) {
+                        deleteProgressListener();
+                        deleteProgressListener = null;
+                    }
+
+                    // Restore original content on error
+                    targetRow.innerHTML = originalContent;
+                    log(`✗ Failed to delete data: ${error}`, 'error');
+                }
+            } else {
+                // Fallback if row not found
+                try {
+                    const result = await invoke('delete_terminology_data', { terminologyType });
+                    log(`✓ ${result}`, 'success');
+                    await refreshStorageInfo();
+                    await refreshStatus();
+                } catch (error) {
+                    log(`✗ Failed to delete data: ${error}`, 'error');
+                }
+            }
+        }
+
+        async function deleteAll(terminologyType) {
+            console.log('deleteAll called with:', terminologyType);
+            const termName = getTerminologyDisplayName(terminologyType);
+
+            const confirmed = await showConfirmDialog(
+                'Confirm Complete Deletion',
+                `Delete EVERYTHING for ${termName}?\n\nThis will remove:\n- Downloaded file\n- All database records\n\nYou'll need to re-download and re-import to use this terminology again.\n\nAre you sure?`
+            );
+
+            if (!confirmed) {
+                console.log('User cancelled deletion');
+                return;
+            }
+            console.log('User confirmed deletion, proceeding...');
+
+            // Find the row in the storage table
+            const tbody = document.getElementById('storageTableBody');
+            const rows = tbody.querySelectorAll('tr');
+            let targetRow = null;
+
+            rows.forEach(row => {
+                const deleteBtn = row.querySelector(`[data-type="${terminologyType}"]`);
+                if (deleteBtn) {
+                    targetRow = row;
+                }
+            });
+
+            if (targetRow) {
+                // Store original content
+                const originalContent = targetRow.innerHTML;
+
+                // Create progress UI (includes file deletion phase)
+                targetRow.innerHTML = `
+                    <td colspan="6">
+                        <div class="delete-progress-multi">
+                            <div class="phase-item pending" data-phase="Starting">
+                                <span class="phase-icon"></span>
+                                <span class="phase-label">Starting</span>
+                            </div>
+                            <div class="phase-item pending" data-phase="Counting">
+                                <span class="phase-icon"></span>
+                                <span class="phase-label">Counting</span>
+                            </div>
+                            <div class="phase-item pending" data-phase="Deleting">
+                                <span class="phase-icon"></span>
+                                <span class="phase-label">Deleting Data</span>
+                            </div>
+                            <div class="phase-item pending" data-phase="Updating">
+                                <span class="phase-icon"></span>
+                                <span class="phase-label">Updating</span>
+                            </div>
+                            <div class="phase-item pending" data-phase="Complete">
+                                <span class="phase-icon"></span>
+                                <span class="phase-label">Complete</span>
+                            </div>
+                        </div>
+                    </td>
+                `;
+
+                // Listen for delete progress events
+                if (deleteProgressListener) {
+                    deleteProgressListener();
+                }
+
+                deleteProgressListener = await window.__TAURI__.event.listen('delete-progress', (event) => {
+                    const progress = event.payload;
+                    const phaseItems = targetRow.querySelectorAll('.phase-item');
+
+                    phaseItems.forEach(item => {
+                        const phaseName = item.getAttribute('data-phase');
+                        const icon = item.querySelector('.phase-icon');
+                        const label = item.querySelector('.phase-label');
+
+                        if (phaseName === progress.phase) {
+                            icon.textContent = '✓';
+                            item.classList.remove('pending', 'completed');
+                            item.classList.add('in-progress');
+
+                            // Update label with message if it's the deletion phase
+                            if (progress.phase === 'Deleting' && progress.message) {
+                                label.textContent = progress.message;
+                            }
+                        } else {
+                            // Check if this phase is before the current phase
+                            const currentPhaseIndex = Array.from(phaseItems).findIndex(p => p.getAttribute('data-phase') === progress.phase);
+                            const thisPhaseIndex = Array.from(phaseItems).indexOf(item);
+
+                            if (thisPhaseIndex < currentPhaseIndex) {
+                                icon.textContent = '✓';
+                                item.classList.remove('pending', 'in-progress');
+                                item.classList.add('completed');
+                            }
+                        }
+                    });
+                });
+
+                try {
+                    const result = await invoke('delete_all_terminology_data', { terminologyType });
+
+                    // Clean up listener
+                    if (deleteProgressListener) {
+                        deleteProgressListener();
+                        deleteProgressListener = null;
+                    }
+
+                    log(`✓ ${result}`, 'success');
+                    await refreshStorageInfo();
+                    await refreshStatus();
+                } catch (error) {
+                    // Clean up listener
+                    if (deleteProgressListener) {
+                        deleteProgressListener();
+                        deleteProgressListener = null;
+                    }
+
+                    // Restore original content on error
+                    targetRow.innerHTML = originalContent;
+                    log(`✗ Failed to delete: ${error}`, 'error');
+                }
+            } else {
+                // Fallback if row not found
+                try {
+                    const result = await invoke('delete_all_terminology_data', { terminologyType });
+                    log(`✓ ${result}`, 'success');
+                    await refreshStorageInfo();
+                    await refreshStatus();
+                } catch (error) {
+                    log(`✗ Failed to delete: ${error}`, 'error');
+                }
             }
         }
 
@@ -642,7 +1059,8 @@
                 }
 
                 // Determine status badges
-                const downloaded = status && status.downloaded_at;
+                // Only show "Downloaded" if we have both downloaded_at timestamp AND a valid file_path
+                const downloaded = status && status.downloaded_at && status.file_path;
                 const imported = status && status.imported;
 
                 let statusBadges = '';
@@ -652,7 +1070,7 @@
                 if (imported) {
                     statusBadges += '<span class="status imported">Imported</span>';
                 }
-                if (!downloaded) {
+                if (!downloaded && !imported) {
                     statusBadges = '<span class="status not-synced">Not Synced</span>';
                 }
 
@@ -660,15 +1078,17 @@
                     <h3>${term.name}</h3>
                     <div class="status-badges">${statusBadges}</div>
                     <p class="description">${term.description}</p>
-                    ${status ? `
+                    ${(status && (downloaded || imported)) ? `
                         <div class="info-row">
                             <span class="info-label">Version:</span>
                             <span class="info-value">${status.version}</span>
                         </div>
+                        ${downloaded ? `
                         <div class="info-row">
                             <span class="info-label">Downloaded:</span>
-                            <span class="info-value">${status.downloaded_at ? new Date(status.downloaded_at).toLocaleDateString() : 'No'}</span>
+                            <span class="info-value">${new Date(status.downloaded_at).toLocaleDateString()}</span>
                         </div>
+                        ` : ''}
                         ${status.imported && status.imported_at ? `
                         <div class="info-row">
                             <span class="info-label">Imported:</span>
@@ -714,6 +1134,24 @@
                     importTerminology(termId);
                 });
             });
+        }
+
+        async function cleanupGhostVersions() {
+            const btn = document.getElementById('cleanupGhosts');
+            btn.disabled = true;
+            btn.textContent = 'Cleaning...';
+
+            try {
+                const result = await invoke('cleanup_ghost_versions');
+                log(`✓ ${result}`, 'success');
+                await refreshStatus();
+                await refreshStorageInfo();
+            } catch (error) {
+                log(`✗ Cleanup failed: ${error}`, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Cleanup Database';
+            }
         }
 
         async function testConnection() {
@@ -768,6 +1206,7 @@
             document.getElementById('testConnection').addEventListener('click', testConnection);
             document.getElementById('syncAll').addEventListener('click', syncAll);
             document.getElementById('refreshStatus').addEventListener('click', refreshStatus);
+            document.getElementById('cleanupGhosts').addEventListener('click', cleanupGhostVersions);
             document.getElementById('searchBtn').addEventListener('click', searchTerminology);
 
             // ValueSet browser event listeners
@@ -784,8 +1223,40 @@
                 }
             });
 
+            // Event delegation for storage management delete buttons
+            document.getElementById('storageTableBody').addEventListener('click', (e) => {
+                console.log('Click detected on storage table');
+                console.log('Click target:', e.target);
+                console.log('Target tagName:', e.target.tagName);
+                console.log('Target classes:', e.target.className);
+
+                const button = e.target.closest('button');
+                console.log('Found button:', button);
+
+                if (!button) {
+                    console.log('No button found, returning');
+                    return;
+                }
+
+                console.log('Button classes:', button.className);
+                console.log('Button data-type:', button.dataset.type);
+
+                if (button.classList.contains('delete-file')) {
+                    console.log('Calling deleteFile for:', button.dataset.type);
+                    deleteFile(button.dataset.type);
+                } else if (button.classList.contains('delete-data')) {
+                    console.log('Calling deleteData for:', button.dataset.type);
+                    deleteData(button.dataset.type);
+                } else if (button.classList.contains('delete-all')) {
+                    console.log('Calling deleteAll for:', button.dataset.type);
+                    deleteAll(button.dataset.type);
+                } else {
+                    console.log('Button found but no matching class');
+                }
+            });
+
             await refreshStatus();
-            await refreshStats();
+            await refreshStorageInfo();
         });
     </script>
 </body>

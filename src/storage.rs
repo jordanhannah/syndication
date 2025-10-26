@@ -32,10 +32,8 @@ pub struct TerminologyVersion {
     pub effective_date: Option<String>,
     pub download_url: String,
     pub file_path: Option<String>,
-    #[serde(with = "chrono::serde::ts_seconds_option")]
     pub downloaded_at: Option<DateTime<Utc>>,
     pub is_latest: bool,
-    #[serde(with = "chrono::serde::ts_seconds")]
     pub created_at: DateTime<Utc>,
     // NCTS extension fields
     pub content_item_identifier: Option<String>,
@@ -44,7 +42,6 @@ pub struct TerminologyVersion {
     pub sct_base_version: Option<String>,
     // Import tracking
     pub imported: bool,
-    #[serde(with = "chrono::serde::ts_seconds_option")]
     pub imported_at: Option<DateTime<Utc>>,
 }
 
@@ -504,6 +501,11 @@ impl TerminologyStorage {
         id: i64,
         file_path: &str,
     ) -> Result<(), StorageError> {
+        // If file_path is empty, clear the download metadata instead
+        if file_path.is_empty() {
+            return self.clear_downloaded(id).await;
+        }
+
         sqlx::query(
             r#"
             UPDATE terminology_versions
@@ -513,6 +515,22 @@ impl TerminologyStorage {
         )
         .bind(file_path)
         .bind(Utc::now().to_rfc3339())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Clear download metadata (file_path and downloaded_at) for a version
+    pub async fn clear_downloaded(&self, id: i64) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            UPDATE terminology_versions
+            SET file_path = NULL, downloaded_at = NULL
+            WHERE id = ?
+            "#,
+        )
         .bind(id)
         .execute(&self.pool)
         .await?;

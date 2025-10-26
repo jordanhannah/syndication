@@ -8,10 +8,11 @@ mod storage;
 
 use auth::TokenManager;
 use commands::{
-    expand_valueset, fetch_all_versions, fetch_latest_version, get_all_local_latest,
-    get_local_latest, get_local_versions, get_storage_stats, import_terminology, list_valuesets,
-    lookup_code, search_terminology, sync_all_terminologies, sync_terminology, test_connection,
-    validate_code, AppState,
+    cleanup_ghost_versions, delete_all_terminology_data, delete_terminology_data,
+    delete_terminology_file, expand_valueset, fetch_all_versions, fetch_latest_version,
+    get_all_local_latest, get_detailed_storage_info, get_local_latest, get_local_versions,
+    get_storage_stats, import_terminology, list_valuesets, lookup_code, search_terminology,
+    sync_all_terminologies, sync_terminology, test_connection, validate_code, AppState,
 };
 use directories::ProjectDirs;
 use import::TerminologyImporter;
@@ -86,7 +87,12 @@ pub fn run() {
             validate_code,
             list_valuesets,
             get_storage_stats,
+            get_detailed_storage_info,
+            delete_terminology_file,
+            delete_terminology_data,
+            delete_all_terminology_data,
             test_connection,
+            cleanup_ghost_versions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
