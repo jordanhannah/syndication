@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// FHIR R4 ValueSet entry (from Bundle)
@@ -44,11 +45,14 @@ impl ValueSetR4Parser {
         // Check if this is a Bundle resource
         if let Some(resource_type) = bundle.get("resourceType").and_then(|v| v.as_str()) {
             if resource_type == "Bundle" {
-                // Parse bundle entries
+                // First pass: Build CodeSystem lookup for display names
+                let codesystem_lookup = Self::build_codesystem_lookup(&bundle);
+
+                // Second pass: Parse ValueSets with CodeSystem lookup
                 if let Some(entries) = bundle.get("entry").and_then(|v| v.as_array()) {
                     for entry in entries {
                         if let Some(resource) = entry.get("resource") {
-                            if let Ok(valueset) = Self::parse_valueset(resource) {
+                            if let Ok(valueset) = Self::parse_valueset(resource, &codesystem_lookup) {
                                 callback(valueset)?;
                                 count += 1;
                             }
@@ -56,8 +60,9 @@ impl ValueSetR4Parser {
                     }
                 }
             } else if resource_type == "ValueSet" {
-                // Single ValueSet resource
-                if let Ok(valueset) = Self::parse_valueset(&bundle) {
+                // Single ValueSet resource (no CodeSystems available)
+                let empty_lookup = HashMap::new();
+                if let Ok(valueset) = Self::parse_valueset(&bundle, &empty_lookup) {
                     callback(valueset)?;
                     count += 1;
                 }
@@ -67,8 +72,42 @@ impl ValueSetR4Parser {
         Ok(count)
     }
 
+    /// Build a lookup table: (CodeSystem URL, code) -> display
+    fn build_codesystem_lookup(bundle: &Value) -> HashMap<(String, String), String> {
+        let mut lookup = HashMap::new();
+
+        if let Some(entries) = bundle.get("entry").and_then(|v| v.as_array()) {
+            for entry in entries {
+                if let Some(resource) = entry.get("resource") {
+                    if let Some("CodeSystem") = resource.get("resourceType").and_then(|v| v.as_str()) {
+                        if let Some(url) = resource.get("url").and_then(|v| v.as_str()) {
+                            if let Some(concepts) = resource.get("concept").and_then(|v| v.as_array()) {
+                                for concept in concepts {
+                                    if let (Some(code), Some(display)) = (
+                                        concept.get("code").and_then(|v| v.as_str()),
+                                        concept.get("display").and_then(|v| v.as_str()),
+                                    ) {
+                                        lookup.insert(
+                                            (url.to_string(), code.to_string()),
+                                            display.to_string(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        lookup
+    }
+
     /// Parse a single ValueSet resource
-    fn parse_valueset(resource: &Value) -> Result<ValueSetEntry> {
+    fn parse_valueset(
+        resource: &Value,
+        codesystem_lookup: &HashMap<(String, String), String>,
+    ) -> Result<ValueSetEntry> {
         let url = resource
             .get("url")
             .and_then(|v| v.as_str())
@@ -105,9 +144,12 @@ impl ValueSetR4Parser {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        // Parse expansion if present
+        // Parse expansion if present (pre-expanded ValueSets)
         let expansion = if let Some(expansion_obj) = resource.get("expansion") {
             Self::parse_expansion(expansion_obj)
+        } else if let Some(compose_obj) = resource.get("compose") {
+            // Generate expansion from compose rules
+            Self::parse_compose(compose_obj, codesystem_lookup)
         } else {
             None
         };
@@ -153,6 +195,56 @@ impl ValueSetR4Parser {
         }
     }
 
+    /// Parse the compose section to generate expansion
+    /// This extracts explicitly listed concepts from compose.include[].concept[]
+    /// and resolves display names from the CodeSystem lookup
+    fn parse_compose(
+        compose: &Value,
+        codesystem_lookup: &HashMap<(String, String), String>,
+    ) -> Option<Vec<ValueSetConcept>> {
+        let includes = compose.get("include")?.as_array()?;
+
+        let mut concepts = Vec::new();
+
+        for include in includes {
+            if let Some(system) = include.get("system").and_then(|v| v.as_str()) {
+                // Check if there's an explicit concept list
+                if let Some(concept_array) = include.get("concept").and_then(|v| v.as_array()) {
+                    for concept_obj in concept_array {
+                        if let Some(code) = concept_obj.get("code").and_then(|v| v.as_str()) {
+                            // Try to get display from concept object first
+                            let mut display = concept_obj
+                                .get("display")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+
+                            // If not present, look up from CodeSystem
+                            if display.is_none() {
+                                display = codesystem_lookup
+                                    .get(&(system.to_string(), code.to_string()))
+                                    .cloned();
+                            }
+
+                            concepts.push(ValueSetConcept {
+                                system: system.to_string(),
+                                code: code.to_string(),
+                                display,
+                            });
+                        }
+                    }
+                }
+                // Note: We don't handle filter-based includes here (e.g., "all codes from system X")
+                // Those would require resolving against the CodeSystem, which we'll handle later if needed
+            }
+        }
+
+        if concepts.is_empty() {
+            None
+        } else {
+            Some(concepts)
+        }
+    }
+
 }
 
 #[cfg(test)]
@@ -182,7 +274,8 @@ mod tests {
         "#;
 
         let resource: Value = serde_json::from_str(json).unwrap();
-        let valueset = ValueSetR4Parser::parse_valueset(&resource).unwrap();
+        let empty_lookup = HashMap::new();
+        let valueset = ValueSetR4Parser::parse_valueset(&resource, &empty_lookup).unwrap();
 
         assert_eq!(valueset.url, "http://example.org/ValueSet/test");
         assert_eq!(valueset.version, Some("1.0.0".to_string()));

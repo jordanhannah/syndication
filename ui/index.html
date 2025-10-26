@@ -16,8 +16,68 @@
             <button id="refreshStatus">Refresh Status</button>
         </div>
 
+        <div class="search-panel">
+            <h2>Search Terminology</h2>
+            <div class="search-controls">
+                <input type="text" id="searchInput" placeholder="Search for codes or terms (e.g., 'diabetes', '73211009')...">
+                <div class="search-filters">
+                    <label><input type="checkbox" value="snomed" checked> SNOMED</label>
+                    <label><input type="checkbox" value="amt" checked> AMT</label>
+                    <label><input type="checkbox" value="valuesets" checked> ValueSets</label>
+                    <label><input type="checkbox" value="all"> All</label>
+                </div>
+                <button id="searchBtn">Search</button>
+            </div>
+            <div id="searchResults" class="search-results hidden">
+                <h3>Results</h3>
+                <div class="results-container"></div>
+            </div>
+        </div>
+
         <div class="terminology-grid" id="terminologies">
             <!-- Terminology cards will be inserted here -->
+        </div>
+
+        <div class="stats-panel" id="statsPanel">
+            <h2>Storage Statistics</h2>
+            <div class="stats-grid" id="statsGrid">
+                <div class="stat-card">
+                    <span class="stat-label">SNOMED Concepts</span>
+                    <span class="stat-value" id="statSnomedConcepts">-</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label">SNOMED Descriptions</span>
+                    <span class="stat-value" id="statSnomedDescriptions">-</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label">AMT Codes</span>
+                    <span class="stat-value" id="statAmtCodes">-</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label">Value Sets</span>
+                    <span class="stat-value" id="statValueSets">-</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="valueset-browser">
+            <h2>ValueSet Browser</h2>
+            <div class="browser-controls">
+                <button id="loadValueSetsBtn">Load All ValueSets</button>
+                <input type="text" id="valuesetFilterInput" placeholder="Filter ValueSets by name or URL...">
+            </div>
+            <div id="valuesetList" class="valueset-list hidden">
+                <!-- ValueSets will be loaded here -->
+            </div>
+            <div id="valuesetExpansion" class="valueset-expansion hidden">
+                <div class="expansion-header">
+                    <h3 id="expansionTitle">ValueSet Expansion</h3>
+                    <button id="closeExpansionBtn">Close</button>
+                </div>
+                <div id="expansionContent" class="expansion-content">
+                    <!-- Expansion will be loaded here -->
+                </div>
+            </div>
         </div>
 
         <div class="logs">
@@ -113,6 +173,280 @@
             }
         }
 
+        async function importTerminology(id) {
+            const card = document.querySelector(`[data-id="${id}"]`);
+            const importBtn = card.querySelector('.import-btn');
+
+            if (!importBtn) return;
+
+            const statusBadges = card.querySelector('.status-badges');
+            const originalHtml = statusBadges.innerHTML;
+            statusBadges.innerHTML = '<span class="status syncing">Importing...</span>';
+            importBtn.disabled = true;
+
+            const termName = terminologies.find(t => t.id === id).name;
+            log(`Starting import for ${termName}... (This may take several minutes)`);
+
+            try {
+                const result = await invoke('import_terminology', { terminologyType: id });
+
+                log(`✓ ${termName} imported successfully`, 'success');
+                await refreshStatus();
+                await refreshStats();
+            } catch (error) {
+                statusBadges.innerHTML = originalHtml;
+                log(`✗ Import failed: ${error}`, 'error');
+                importBtn.disabled = false;
+            }
+        }
+
+        async function searchTerminology() {
+            const input = document.getElementById('searchInput');
+            const query = input.value.trim();
+
+            if (!query || query.length < 2) {
+                log('Please enter at least 2 characters to search', 'error');
+                return;
+            }
+
+            const checkboxes = document.querySelectorAll('.search-filters input[type="checkbox"]:checked');
+            const terminologyTypes = Array.from(checkboxes).map(cb => cb.value);
+
+            if (terminologyTypes.length === 0) {
+                log('Please select at least one terminology type', 'error');
+                return;
+            }
+
+            log(`Searching for "${query}" in ${terminologyTypes.join(', ')}...`);
+
+            try {
+                const results = await invoke('search_terminology', {
+                    query,
+                    terminologyTypes,
+                    limit: 50
+                });
+
+                displaySearchResults(results);
+            } catch (error) {
+                log(`✗ Search failed: ${error}`, 'error');
+            }
+        }
+
+        function displaySearchResults(results) {
+            const resultsSection = document.getElementById('searchResults');
+            const container = resultsSection.querySelector('.results-container');
+
+            if (results.length === 0) {
+                container.innerHTML = '<p class="no-results">No results found</p>';
+                resultsSection.classList.remove('hidden');
+                return;
+            }
+
+            const tableHtml = `
+                <table class="results-table">
+                    <thead>
+                        <tr>
+                            <th>Code</th>
+                            <th>System</th>
+                            <th>Display</th>
+                            <th>Type</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${results.map(r => `
+                            <tr>
+                                <td><code>${r.code}</code></td>
+                                <td>${r.system.split('/').pop()}</td>
+                                <td>${r.display}</td>
+                                <td>${r.terminology_type.toUpperCase()}</td>
+                                <td><span class="status-pill ${r.active ? 'active' : 'inactive'}">${r.active ? 'Active' : 'Inactive'}</span></td>
+                                <td>
+                                    ${r.terminology_type === 'valuesets'
+                                        ? `<button class="expand-btn-small" data-url="${r.code}">Expand</button>`
+                                        : '-'}
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+                <p class="results-count">Showing ${results.length} results</p>
+            `;
+
+            container.innerHTML = tableHtml;
+            resultsSection.classList.remove('hidden');
+
+            // Add event listeners to expand buttons
+            container.querySelectorAll('.expand-btn-small').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const url = btn.getAttribute('data-url');
+                    expandValueSet(url);
+                });
+            });
+
+            log(`Found ${results.length} results`, 'success');
+        }
+
+        async function refreshStats() {
+            try {
+                const stats = await invoke('get_storage_stats');
+
+                document.getElementById('statSnomedConcepts').textContent = stats.snomed_concepts.toLocaleString();
+                document.getElementById('statSnomedDescriptions').textContent = stats.snomed_descriptions.toLocaleString();
+                document.getElementById('statAmtCodes').textContent = stats.amt_codes.toLocaleString();
+                document.getElementById('statValueSets').textContent = stats.valuesets.toLocaleString();
+            } catch (error) {
+                console.error('Failed to refresh stats:', error);
+            }
+        }
+
+        let allValueSets = [];
+
+        async function loadValueSets() {
+            const btn = document.getElementById('loadValueSetsBtn');
+            btn.disabled = true;
+            btn.textContent = 'Loading...';
+
+            try {
+                const valuesets = await invoke('list_valuesets');
+                allValueSets = valuesets;
+
+                renderValueSetList(valuesets);
+                document.getElementById('valuesetList').classList.remove('hidden');
+
+                log(`Loaded ${valuesets.length} ValueSets`, 'success');
+            } catch (error) {
+                log(`✗ Failed to load ValueSets: ${error}`, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Reload ValueSets';
+            }
+        }
+
+        function renderValueSetList(valuesets) {
+            const container = document.getElementById('valuesetList');
+
+            if (valuesets.length === 0) {
+                container.innerHTML = '<p class="no-results">No ValueSets available. Import ValueSets terminology first.</p>';
+                return;
+            }
+
+            const html = `
+                <table class="valueset-table">
+                    <thead>
+                        <tr>
+                            <th>Title</th>
+                            <th>URL</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${valuesets.map(([url, title]) => `
+                            <tr>
+                                <td>${title || url.split('/').pop()}</td>
+                                <td><code class="valueset-url">${url}</code></td>
+                                <td><button class="expand-btn" data-url="${url}">Expand</button></td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+
+            container.innerHTML = html;
+
+            // Add event listeners to expand buttons
+            container.querySelectorAll('.expand-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const url = btn.getAttribute('data-url');
+                    expandValueSet(url);
+                });
+            });
+        }
+
+        async function expandValueSet(url) {
+            const expansionDiv = document.getElementById('valuesetExpansion');
+            const titleEl = document.getElementById('expansionTitle');
+            const contentEl = document.getElementById('expansionContent');
+
+            titleEl.textContent = 'Loading...';
+            contentEl.innerHTML = '<p class="loading-text">Expanding ValueSet...</p>';
+            expansionDiv.classList.remove('hidden');
+
+            log(`Expanding ValueSet: ${url}`);
+
+            try {
+                const expansion = await invoke('expand_valueset', { valuesetUrl: url });
+
+                if (!expansion) {
+                    contentEl.innerHTML = '<p class="no-results">ValueSet not found or has no expansion.</p>';
+                    titleEl.textContent = 'Not Found';
+                    return;
+                }
+
+                titleEl.textContent = expansion.title || url.split('/').pop();
+
+                const html = `
+                    <div class="expansion-meta">
+                        <div class="meta-row">
+                            <span class="meta-label">URL:</span>
+                            <span class="meta-value"><code>${expansion.url}</code></span>
+                        </div>
+                        ${expansion.version ? `
+                        <div class="meta-row">
+                            <span class="meta-label">Version:</span>
+                            <span class="meta-value">${expansion.version}</span>
+                        </div>
+                        ` : ''}
+                        <div class="meta-row">
+                            <span class="meta-label">Total Concepts:</span>
+                            <span class="meta-value">${expansion.total}</span>
+                        </div>
+                    </div>
+                    <table class="expansion-table">
+                        <thead>
+                            <tr>
+                                <th>Code</th>
+                                <th>System</th>
+                                <th>Display</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${expansion.concepts.map(c => `
+                                <tr>
+                                    <td><code>${c.code}</code></td>
+                                    <td>${c.system.split('/').pop()}</td>
+                                    <td>${c.display || '-'}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                `;
+
+                contentEl.innerHTML = html;
+                log(`✓ Expanded ValueSet with ${expansion.total} concepts`, 'success');
+            } catch (error) {
+                contentEl.innerHTML = `<p class="error-text">Failed to expand: ${error}</p>`;
+                log(`✗ Failed to expand ValueSet: ${error}`, 'error');
+            }
+        }
+
+        function filterValueSets() {
+            const input = document.getElementById('valuesetFilterInput');
+            const filter = input.value.toLowerCase();
+
+            if (!filter) {
+                renderValueSetList(allValueSets);
+                return;
+            }
+
+            const filtered = allValueSets.filter(([url, title]) => {
+                return url.toLowerCase().includes(filter) || (title && title.toLowerCase().includes(filter));
+            });
+
+            renderValueSetList(filtered);
+        }
+
         async function refreshStatus() {
             try {
                 const allLatest = await invoke('get_all_local_latest');
@@ -154,12 +488,24 @@
                     continue;
                 }
 
-                const statusClass = status ? 'synced' : 'not-synced';
-                const statusText = status ? 'Synced' : 'Not Synced';
+                // Determine status badges
+                const downloaded = status && status.downloaded_at;
+                const imported = status && status.imported;
+
+                let statusBadges = '';
+                if (downloaded) {
+                    statusBadges += '<span class="status synced">Downloaded</span>';
+                }
+                if (imported) {
+                    statusBadges += '<span class="status imported">Imported</span>';
+                }
+                if (!downloaded) {
+                    statusBadges = '<span class="status not-synced">Not Synced</span>';
+                }
 
                 card.innerHTML = `
                     <h3>${term.name}</h3>
-                    <span class="status ${statusClass}">${statusText}</span>
+                    <div class="status-badges">${statusBadges}</div>
                     <p class="description">${term.description}</p>
                     ${status ? `
                         <div class="info-row">
@@ -170,6 +516,12 @@
                             <span class="info-label">Downloaded:</span>
                             <span class="info-value">${status.downloaded_at ? new Date(status.downloaded_at).toLocaleDateString() : 'No'}</span>
                         </div>
+                        ${status.imported && status.imported_at ? `
+                        <div class="info-row">
+                            <span class="info-label">Imported:</span>
+                            <span class="info-value">${new Date(status.imported_at).toLocaleDateString()}</span>
+                        </div>
+                        ` : ''}
                         ${status.effective_date ? `
                         <div class="info-row">
                             <span class="info-label">Effective Date:</span>
@@ -181,6 +533,11 @@
                         <button class="sync-btn" data-term-id="${term.id}">
                             Sync Latest
                         </button>
+                        ${downloaded && !imported ? `
+                        <button class="import-btn" data-term-id="${term.id}">
+                            Import Data
+                        </button>
+                        ` : ''}
                     </div>
                 `;
 
@@ -195,6 +552,15 @@
                     syncTerminology(termId);
                 });
             });
+
+            // Add event listeners to import buttons
+            const importButtons = document.querySelectorAll('.import-btn[data-term-id]');
+            importButtons.forEach(button => {
+                button.addEventListener('click', () => {
+                    const termId = button.getAttribute('data-term-id');
+                    importTerminology(termId);
+                });
+            });
         }
 
         // Initialize on load
@@ -204,8 +570,24 @@
             // Add event listeners to top-level buttons
             document.getElementById('syncAll').addEventListener('click', syncAll);
             document.getElementById('refreshStatus').addEventListener('click', refreshStatus);
+            document.getElementById('searchBtn').addEventListener('click', searchTerminology);
+
+            // ValueSet browser event listeners
+            document.getElementById('loadValueSetsBtn').addEventListener('click', loadValueSets);
+            document.getElementById('valuesetFilterInput').addEventListener('input', filterValueSets);
+            document.getElementById('closeExpansionBtn').addEventListener('click', () => {
+                document.getElementById('valuesetExpansion').classList.add('hidden');
+            });
+
+            // Allow search on Enter key
+            document.getElementById('searchInput').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    searchTerminology();
+                }
+            });
 
             await refreshStatus();
+            await refreshStats();
         });
     </script>
 </body>

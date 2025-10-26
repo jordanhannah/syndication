@@ -13,6 +13,14 @@ pub struct SyncResult {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StorageStats {
+    pub snomed_concepts: i64,
+    pub snomed_descriptions: i64,
+    pub amt_codes: i64,
+    pub valuesets: i64,
+}
+
 pub struct AppState {
     pub ncts_client: NctsClient,
     pub storage: Arc<Mutex<TerminologyStorage>>,
@@ -351,6 +359,13 @@ pub async fn search_terminology(
                             .map_err(|e| format!("AMT search failed: {}", e))?;
                     results.extend(amt_results);
                 }
+                "valuesets" => {
+                    let valueset_results =
+                        crate::queries::TerminologyQueries::search_valuesets(pool, &query, limit)
+                            .await
+                            .map_err(|e| format!("ValueSet search failed: {}", e))?;
+                    results.extend(valueset_results);
+                }
                 _ => {}
             }
         }
@@ -423,6 +438,41 @@ pub async fn list_valuesets(
     crate::queries::TerminologyQueries::list_valuesets(pool)
         .await
         .map_err(|e| format!("Failed to list ValueSets: {}", e))
+}
+
+/// Get storage statistics (record counts)
+#[tauri::command]
+pub async fn get_storage_stats(state: State<'_, AppState>) -> Result<StorageStats, String> {
+    let storage = state.storage.lock().await;
+    let pool = storage.pool();
+
+    // Query record counts from each table
+    let snomed_concepts: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM snomed_concepts")
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0,));
+
+    let snomed_descriptions: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM snomed_descriptions")
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0,));
+
+    let amt_codes: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM amt_codes")
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0,));
+
+    let valuesets: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM valuesets")
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0,));
+
+    Ok(StorageStats {
+        snomed_concepts: snomed_concepts.0,
+        snomed_descriptions: snomed_descriptions.0,
+        amt_codes: amt_codes.0,
+        valuesets: valuesets.0,
+    })
 }
 
 /// Helper function to parse terminology type string

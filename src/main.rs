@@ -9,8 +9,9 @@ mod storage;
 use auth::TokenManager;
 use commands::{
     expand_valueset, fetch_all_versions, fetch_latest_version, get_all_local_latest,
-    get_local_latest, get_local_versions, import_terminology, list_valuesets, lookup_code,
-    search_terminology, sync_all_terminologies, sync_terminology, validate_code, AppState,
+    get_local_latest, get_local_versions, get_storage_stats, import_terminology, list_valuesets,
+    lookup_code, search_terminology, sync_all_terminologies, sync_terminology, validate_code,
+    AppState,
 };
 use directories::ProjectDirs;
 use ncts::NctsClient;
@@ -77,6 +78,7 @@ pub fn run() {
             expand_valueset,
             validate_code,
             list_valuesets,
+            get_storage_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

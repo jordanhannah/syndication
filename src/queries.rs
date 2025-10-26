@@ -220,6 +220,59 @@ impl TerminologyQueries {
             .collect())
     }
 
+    /// Full-text search across ValueSets
+    pub async fn search_valuesets(
+        pool: &SqlitePool,
+        query: &str,
+        limit: i32,
+    ) -> Result<Vec<SearchResult>> {
+        let search_pattern = format!("%{}%", query);
+
+        let results: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT url, title, name
+            FROM valuesets
+            WHERE url LIKE ? OR title LIKE ? OR name LIKE ? OR description LIKE ?
+            ORDER BY
+                CASE
+                    WHEN url LIKE ? THEN 0
+                    WHEN title LIKE ? THEN 1
+                    WHEN name LIKE ? THEN 2
+                    ELSE 3
+                END,
+                title
+            LIMIT ?
+            "#,
+        )
+        .bind(&search_pattern)
+        .bind(&search_pattern)
+        .bind(&search_pattern)
+        .bind(&search_pattern)
+        .bind(format!("{}%", query)) // URL prefix match gets priority
+        .bind(format!("{}%", query)) // Title prefix match
+        .bind(format!("{}%", query)) // Name prefix match
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(results
+            .into_iter()
+            .map(|(url, title, name)| {
+                let display = title
+                    .or(name)
+                    .unwrap_or_else(|| url.split('/').last().unwrap_or("Unknown").to_string());
+
+                SearchResult {
+                    code: url.clone(),
+                    system: "http://hl7.org/fhir/ValueSet".to_string(),
+                    display,
+                    terminology_type: "valuesets".to_string(),
+                    active: true,
+                }
+            })
+            .collect())
+    }
+
     /// Search across all terminologies
     pub async fn search_all(
         pool: &SqlitePool,
@@ -228,13 +281,17 @@ impl TerminologyQueries {
     ) -> Result<Vec<SearchResult>> {
         let mut results = Vec::new();
 
-        // Search SNOMED (half the limit)
-        let snomed_results = Self::search_snomed(pool, query, limit / 2).await?;
+        // Search SNOMED (third of the limit)
+        let snomed_results = Self::search_snomed(pool, query, limit / 3).await?;
         results.extend(snomed_results);
 
-        // Search AMT (half the limit)
-        let amt_results = Self::search_amt(pool, query, limit / 2).await?;
+        // Search AMT (third of the limit)
+        let amt_results = Self::search_amt(pool, query, limit / 3).await?;
         results.extend(amt_results);
+
+        // Search ValueSets (third of the limit)
+        let valueset_results = Self::search_valuesets(pool, query, limit / 3).await?;
+        results.extend(valueset_results);
 
         Ok(results)
     }
