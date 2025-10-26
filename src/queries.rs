@@ -20,6 +20,7 @@ pub struct SearchResult {
     pub display: String,
     pub terminology_type: String,
     pub active: bool,
+    pub subtype: Option<String>,
 }
 
 /// ValueSet expansion result
@@ -179,6 +180,7 @@ impl TerminologyQueries {
                 display,
                 terminology_type: "snomed".to_string(),
                 active: active == 1,
+                subtype: None,
             })
             .collect())
     }
@@ -191,9 +193,9 @@ impl TerminologyQueries {
     ) -> Result<Vec<SearchResult>> {
         let search_pattern = format!("%{}%", query);
 
-        let results: Vec<(String, String)> = sqlx::query_as(
+        let results: Vec<(String, String, String)> = sqlx::query_as(
             r#"
-            SELECT id, preferred_term
+            SELECT id, preferred_term, code_type
             FROM amt_codes
             WHERE preferred_term LIKE ?
             ORDER BY
@@ -210,12 +212,13 @@ impl TerminologyQueries {
 
         Ok(results
             .into_iter()
-            .map(|(code, display)| SearchResult {
+            .map(|(code, display, code_type)| SearchResult {
                 code,
                 system: "http://hl7.org/fhir/sid/ncts-amt".to_string(),
                 display,
                 terminology_type: "amt".to_string(),
                 active: true,
+                subtype: Some(code_type),
             })
             .collect())
     }
@@ -268,6 +271,7 @@ impl TerminologyQueries {
                     display,
                     terminology_type: "valuesets".to_string(),
                     active: true,
+                    subtype: None,
                 }
             })
             .collect())

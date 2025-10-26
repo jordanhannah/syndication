@@ -250,6 +250,7 @@
                             <th>System</th>
                             <th>Display</th>
                             <th>Type</th>
+                            <th>Subtype</th>
                             <th>Status</th>
                             <th>Actions</th>
                         </tr>
@@ -261,6 +262,7 @@
                                 <td>${r.system.split('/').pop()}</td>
                                 <td>${r.display}</td>
                                 <td>${r.terminology_type.toUpperCase()}</td>
+                                <td>${r.subtype || '-'}</td>
                                 <td><span class="status-pill ${r.active ? 'active' : 'inactive'}">${r.active ? 'Active' : 'Inactive'}</span></td>
                                 <td>
                                     ${r.terminology_type === 'valuesets'

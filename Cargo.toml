@@ -23,5 +23,8 @@ quick-xml = "0.37"
 hex = "0.4"
 zip = "2.2"
 
+[dev-dependencies]
+tempfile = "3.13"
+
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }
