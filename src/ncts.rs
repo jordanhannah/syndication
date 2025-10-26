@@ -242,13 +242,25 @@ impl NctsClient {
         Ok(latest)
     }
 
-    /// Download terminology data from a URL
+    /// Download terminology data from a URL with optional progress tracking
     pub async fn download_terminology(
         &self,
         url: &str,
         destination: &std::path::Path,
+        app_handle: Option<tauri::AppHandle>,
     ) -> Result<()> {
+        use tauri::Emitter;
+
         println!("Downloading from: {}", url);
+
+        // Emit initial progress
+        if let Some(handle) = &app_handle {
+            let _ = handle.emit("sync-progress", serde_json::json!({
+                "phase": "Downloading",
+                "message": "Starting download...".to_string(),
+                "percentage": 0.0,
+            }));
+        }
 
         // Get access token
         let token = self.token_manager.get_token().await
@@ -266,12 +278,42 @@ impl NctsClient {
             anyhow::bail!("Failed to download: HTTP {}", response.status());
         }
 
+        // Get content length for progress tracking (currently unused but useful for future enhancements)
+        let _total_size = response.content_length().unwrap_or(0);
+
+        // Download the file
         let bytes = response.bytes().await
             .context("Failed to read download bytes")?;
+
+        // Emit download complete progress
+        if let Some(handle) = &app_handle {
+            let size_mb = bytes.len() as f32 / 1_048_576.0;
+            let _ = handle.emit("sync-progress", serde_json::json!({
+                "phase": "Downloading",
+                "message": format!("Downloaded {:.1} MB", size_mb),
+                "percentage": 50.0,
+            }));
+        }
+
         tokio::fs::write(destination, bytes).await
             .context("Failed to write file")?;
 
+        // Emit write complete progress
+        if let Some(handle) = &app_handle {
+            let _ = handle.emit("sync-progress", serde_json::json!({
+                "phase": "Downloaded",
+                "message": "File saved successfully".to_string(),
+                "percentage": 100.0,
+            }));
+        }
+
         println!("Downloaded to: {:?}", destination);
+        Ok(())
+    }
+
+    /// Test authentication by attempting to get a token
+    pub async fn test_auth(&self) -> Result<()> {
+        self.token_manager.get_token().await?;
         Ok(())
     }
 

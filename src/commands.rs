@@ -2,7 +2,7 @@ use crate::ncts::{FeedEntry, NctsClient, TerminologyType};
 use crate::storage::{TerminologyStorage, TerminologyVersion};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Emitter, State};
 use tokio::sync::Mutex;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -13,12 +13,20 @@ pub struct SyncResult {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncProgress {
+    pub phase: String,
+    pub message: String,
+    pub percentage: f32,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StorageStats {
     pub snomed_concepts: i64,
     pub snomed_descriptions: i64,
     pub amt_codes: i64,
     pub valuesets: i64,
+    pub database_size_mb: f64,
 }
 
 pub struct AppState {
@@ -60,6 +68,7 @@ pub async fn fetch_all_versions(
 #[tauri::command]
 pub async fn sync_terminology(
     terminology_type: String,
+    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SyncResult, String> {
     println!("🔵 sync_terminology called for: {}", terminology_type);
@@ -134,10 +143,17 @@ pub async fn sync_terminology(
     if let Some(download_url) = &latest_entry.download_url {
         let file_path = storage.generate_file_path(&terminology_type, &version);
 
+        // Emit download start event
+        let _ = app_handle.emit("sync-progress", SyncProgress {
+            phase: "Downloading".to_string(),
+            message: format!("Downloading {} from NCTS...", terminology_type),
+            percentage: 0.0,
+        });
+
         // Download the file
         match state
             .ncts_client
-            .download_terminology(download_url, &file_path)
+            .download_terminology(download_url, &file_path, Some(app_handle.clone()))
             .await
         {
             Ok(_) => {
@@ -197,13 +213,16 @@ pub async fn sync_terminology(
 
 /// Sync all terminology types (excludes LOINC - not available via syndication)
 #[tauri::command]
-pub async fn sync_all_terminologies(state: State<'_, AppState>) -> Result<Vec<SyncResult>, String> {
+pub async fn sync_all_terminologies(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<SyncResult>, String> {
     let terminology_types = vec!["snomed", "valuesets", "amt"]; // LOINC excluded - proprietary binary only
 
     let mut results = Vec::new();
 
     for term_type in terminology_types {
-        let result = sync_terminology(term_type.to_string(), state.clone()).await?;
+        let result = sync_terminology(term_type.to_string(), app_handle.clone(), state.clone()).await?;
         results.push(result);
     }
 
@@ -255,6 +274,7 @@ pub async fn get_all_local_latest(
 #[tauri::command]
 pub async fn import_terminology(
     terminology_type: String,
+    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let storage = state.storage.lock().await;
@@ -283,8 +303,9 @@ pub async fn import_terminology(
         .file_path
         .ok_or_else(|| format!("No file path found for {}", terminology_type))?;
 
-    // Create importer
-    let importer = crate::import::TerminologyImporter::new(&storage, version.id);
+    // Create importer with app handle for progress events
+    let importer = crate::import::TerminologyImporter::new(&storage, version.id)
+        .with_app_handle(app_handle);
 
     // Import based on terminology type
     match terminology_type.as_str() {
@@ -467,12 +488,63 @@ pub async fn get_storage_stats(state: State<'_, AppState>) -> Result<StorageStat
         .await
         .unwrap_or((0,));
 
+    // Get database file size
+    let db_path = storage.db_path();
+    let database_size_mb = match tokio::fs::metadata(&db_path).await {
+        Ok(metadata) => metadata.len() as f64 / 1_048_576.0, // Convert bytes to MB
+        Err(_) => 0.0,
+    };
+
     Ok(StorageStats {
         snomed_concepts: snomed_concepts.0,
         snomed_descriptions: snomed_descriptions.0,
         amt_codes: amt_codes.0,
         valuesets: valuesets.0,
+        database_size_mb,
     })
+}
+
+/// Test NCTS connection
+#[tauri::command]
+pub async fn test_connection(state: State<'_, AppState>) -> Result<ConnectionStatus, String> {
+    // Test token acquisition
+    match state.ncts_client.test_auth().await {
+        Ok(_) => {
+            // Try to fetch the feed to verify full connectivity
+            match state
+                .ncts_client
+                .fetch_feed(TerminologyType::Snomed)
+                .await
+            {
+                Ok(_) => Ok(ConnectionStatus {
+                    connected: true,
+                    message: "Successfully connected to NCTS".to_string(),
+                    auth_ok: true,
+                    feed_ok: true,
+                }),
+                Err(e) => Ok(ConnectionStatus {
+                    connected: false,
+                    message: format!("Authentication OK, but feed fetch failed: {}", e),
+                    auth_ok: true,
+                    feed_ok: false,
+                }),
+            }
+        }
+        Err(e) => Ok(ConnectionStatus {
+            connected: false,
+            message: format!("Authentication failed: {}", e),
+            auth_ok: false,
+            feed_ok: false,
+        }),
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConnectionStatus {
+    pub connected: bool,
+    pub message: String,
+    pub auth_ok: bool,
+    pub feed_ok: bool,
 }
 
 /// Helper function to parse terminology type string

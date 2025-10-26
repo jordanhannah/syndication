@@ -10,10 +10,11 @@ use auth::TokenManager;
 use commands::{
     expand_valueset, fetch_all_versions, fetch_latest_version, get_all_local_latest,
     get_local_latest, get_local_versions, get_storage_stats, import_terminology, list_valuesets,
-    lookup_code, search_terminology, sync_all_terminologies, sync_terminology, validate_code,
-    AppState,
+    lookup_code, search_terminology, sync_all_terminologies, sync_terminology, test_connection,
+    validate_code, AppState,
 };
 use directories::ProjectDirs;
+use import::TerminologyImporter;
 use ncts::NctsClient;
 use storage::TerminologyStorage;
 use std::sync::Arc;
@@ -24,6 +25,12 @@ use tokio::sync::Mutex;
 pub fn run() {
     // Load environment variables from .env file
     dotenvy::dotenv().ok(); // Ignore error if .env doesn't exist
+
+    // Clean up any orphaned temporary extraction directories from previous runs
+    println!("Performing startup cleanup...");
+    if let Err(e) = TerminologyImporter::cleanup_orphaned_temp_dirs() {
+        eprintln!("Warning: Failed to cleanup orphaned temp directories: {}", e);
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -79,6 +86,7 @@ pub fn run() {
             validate_code,
             list_valuesets,
             get_storage_stats,
+            test_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -82,6 +82,7 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for TerminologyVersion {
 pub struct TerminologyStorage {
     pool: SqlitePool,
     data_dir: PathBuf,
+    db_path: PathBuf,
 }
 
 impl TerminologyStorage {
@@ -100,7 +101,11 @@ impl TerminologyStorage {
         let db_url = format!("sqlite:///{}?mode=rwc", db_path.display());
         let pool = SqlitePool::connect(&db_url).await?;
 
-        let storage = Self { pool, data_dir };
+        let storage = Self {
+            pool,
+            data_dir,
+            db_path,
+        };
         storage.run_migrations().await?;
 
         Ok(storage)
@@ -633,6 +638,11 @@ impl TerminologyStorage {
     /// Get access to the database pool for import operations
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// Get the database file path
+    pub fn db_path(&self) -> &PathBuf {
+        &self.db_path
     }
 
     /// Sanitize a version string to make it safe for use in filenames

@@ -12,8 +12,10 @@
         <p class="subtitle">Sync and manage Australian clinical terminology standards</p>
 
         <div class="actions">
+            <button id="testConnection" class="test-connection-btn">Test NCTS Connection</button>
             <button id="syncAll">Sync All Terminologies</button>
             <button id="refreshStatus">Refresh Status</button>
+            <div id="connectionStatus" class="connection-status hidden"></div>
         </div>
 
         <div class="search-panel">
@@ -41,6 +43,10 @@
         <div class="stats-panel" id="statsPanel">
             <h2>Storage Statistics</h2>
             <div class="stats-grid" id="statsGrid">
+                <div class="stat-card">
+                    <span class="stat-label">Database Size</span>
+                    <span class="stat-value" id="statDatabaseSize">-</span>
+                </div>
                 <div class="stat-card">
                     <span class="stat-label">SNOMED Concepts</span>
                     <span class="stat-value" id="statSnomedConcepts">-</span>
@@ -112,19 +118,38 @@
             }
         }
 
+        let syncProgressListener = null;
+
         async function syncTerminology(id) {
             const card = document.querySelector(`[data-id="${id}"]`);
             const statusEl = card.querySelector('.status');
             const syncBtn = card.querySelector('.sync-btn');
 
             statusEl.className = 'status syncing';
-            statusEl.textContent = 'Syncing...';
+            statusEl.innerHTML = '<span class="progress-spinner"></span> Syncing...';
             syncBtn.disabled = true;
 
-            log(`Starting sync for ${terminologies.find(t => t.id === id).name}...`);
+            const termName = terminologies.find(t => t.id === id).name;
+            log(`Starting sync for ${termName}...`);
+
+            // Listen for sync progress events
+            if (syncProgressListener) {
+                syncProgressListener();
+            }
+
+            syncProgressListener = await window.__TAURI__.event.listen('sync-progress', (event) => {
+                const progress = event.payload;
+                statusEl.innerHTML = `<span class="progress-spinner"></span> ${progress.phase}: ${progress.message}`;
+            });
 
             try {
                 const result = await invoke('sync_terminology', { terminologyType: id });
+
+                // Clean up listener
+                if (syncProgressListener) {
+                    syncProgressListener();
+                    syncProgressListener = null;
+                }
 
                 if (result.success) {
                     statusEl.className = 'status synced';
@@ -138,6 +163,12 @@
 
                 await refreshStatus();
             } catch (error) {
+                // Clean up listener
+                if (syncProgressListener) {
+                    syncProgressListener();
+                    syncProgressListener = null;
+                }
+
                 statusEl.className = 'status error';
                 statusEl.textContent = 'Error';
                 log(`✗ Sync failed: ${error}`, 'error');
@@ -173,6 +204,8 @@
             }
         }
 
+        let importProgressListener = null;
+
         async function importTerminology(id) {
             const card = document.querySelector(`[data-id="${id}"]`);
             const importBtn = card.querySelector('.import-btn');
@@ -181,19 +214,136 @@
 
             const statusBadges = card.querySelector('.status-badges');
             const originalHtml = statusBadges.innerHTML;
-            statusBadges.innerHTML = '<span class="status syncing">Importing...</span>';
+
+            // Define phases for each terminology type
+            const phases = {
+                'snomed': ['Extracting', 'Locating Files', 'Importing Concepts', 'Importing Descriptions', 'Importing Relationships', 'Cleanup', 'Complete'],
+                'amt': ['Importing AMT', 'Complete'],
+                'valuesets': ['Importing ValueSets', 'Complete']
+            };
+
+            // Create multi-phase progress UI
+            const phaseList = phases[id] || ['Import', 'Complete'];
+            const progressHtml = `
+                <div class="import-progress-multi" id="import-progress-${id}">
+                    ${phaseList.map(phase => `
+                        <div class="phase-item" data-phase="${phase}">
+                            <span class="phase-icon"></span>
+                            <span class="phase-label">${phase}</span>
+                            <span class="phase-count"></span>
+                        </div>
+                    `).join('')}
+                    <div class="progress-bar-container" style="display: none;">
+                        <div class="progress-bar" id="progress-bar-${id}">
+                            <span class="progress-percentage"></span>
+                        </div>
+                    </div>
+                </div>
+            `;
+            statusBadges.innerHTML = progressHtml;
             importBtn.disabled = true;
 
             const termName = terminologies.find(t => t.id === id).name;
             log(`Starting import for ${termName}... (This may take several minutes)`);
 
+            // Listen for progress events
+            if (importProgressListener) {
+                importProgressListener();
+            }
+
+            importProgressListener = await window.__TAURI__.event.listen('import-progress', (event) => {
+                const progress = event.payload;
+                const container = document.getElementById(`import-progress-${id}`);
+
+                if (!container) return;
+
+                const progressBarContainer = container.querySelector('.progress-bar-container');
+                const progressBar = container.querySelector('.progress-bar');
+                const progressPercentage = progressBar?.querySelector('.progress-percentage');
+
+                // Update all phase items based on status
+                const phaseItems = container.querySelectorAll('.phase-item');
+                phaseItems.forEach(item => {
+                    const phaseName = item.getAttribute('data-phase');
+                    const icon = item.querySelector('.phase-icon');
+                    const countSpan = item.querySelector('.phase-count');
+
+                    if (phaseName === progress.phase) {
+                        // Current phase
+                        if (progress.phase_status === 'in_progress') {
+                            icon.textContent = '✓';
+                            item.classList.remove('completed', 'pending');
+                            item.classList.add('in-progress');
+
+                            // Show progress bar if we have total count
+                            if (progress.total && progressBarContainer && progressBar) {
+                                progressBarContainer.style.display = 'block';
+                                progressBar.style.width = `${progress.percentage}%`;
+                                if (progressPercentage) {
+                                    progressPercentage.textContent = `${Math.round(progress.percentage)}%`;
+                                }
+                                countSpan.textContent = `(${progress.current.toLocaleString()} / ${progress.total.toLocaleString()})`;
+                            } else if (progressBarContainer) {
+                                progressBarContainer.style.display = 'none';
+                                countSpan.textContent = '';
+                            }
+                        } else if (progress.phase_status === 'completed') {
+                            icon.textContent = '✓';
+                            item.classList.remove('in-progress', 'pending');
+                            item.classList.add('completed');
+                            if (progressBarContainer) {
+                                progressBarContainer.style.display = 'none';
+                            }
+
+                            if (progress.total) {
+                                countSpan.textContent = `(${progress.current.toLocaleString()} / ${progress.total.toLocaleString()})`;
+                            }
+                        }
+                    } else {
+                        // Check if this phase is before or after the current phase
+                        const currentPhaseIndex = Array.from(phaseItems).findIndex(p => p.getAttribute('data-phase') === progress.phase);
+                        const thisPhaseIndex = Array.from(phaseItems).indexOf(item);
+
+                        if (thisPhaseIndex < currentPhaseIndex) {
+                            // Previous phase - mark as completed
+                            if (!item.classList.contains('completed')) {
+                                icon.textContent = '✓';
+                                item.classList.remove('in-progress', 'pending');
+                                item.classList.add('completed');
+                            }
+                        } else {
+                            // Future phase - mark as pending
+                            if (!item.classList.contains('completed')) {
+                                icon.textContent = '';
+                                item.classList.remove('in-progress', 'completed');
+                                item.classList.add('pending');
+                                countSpan.textContent = '';
+                            }
+                        }
+                    }
+                });
+            });
+
             try {
                 const result = await invoke('import_terminology', { terminologyType: id });
 
                 log(`✓ ${termName} imported successfully`, 'success');
+
+                // Clean up listener
+                if (importProgressListener) {
+                    importProgressListener();
+                    importProgressListener = null;
+                }
+
                 await refreshStatus();
                 await refreshStats();
             } catch (error) {
+                // Clean up listener
+                if (importProgressListener) {
+                    importProgressListener();
+                    importProgressListener = null;
+                }
+
                 statusBadges.innerHTML = originalHtml;
                 log(`✗ Import failed: ${error}`, 'error');
                 importBtn.disabled = false;
@@ -294,6 +444,7 @@
             try {
                 const stats = await invoke('get_storage_stats');
 
+                document.getElementById('statDatabaseSize').textContent = stats.database_size_mb.toFixed(1) + ' MB';
                 document.getElementById('statSnomedConcepts').textContent = stats.snomed_concepts.toLocaleString();
                 document.getElementById('statSnomedDescriptions').textContent = stats.snomed_descriptions.toLocaleString();
                 document.getElementById('statAmtCodes').textContent = stats.amt_codes.toLocaleString();
@@ -565,11 +716,56 @@
             });
         }
 
+        async function testConnection() {
+            const btn = document.getElementById('testConnection');
+            const statusDiv = document.getElementById('connectionStatus');
+
+            btn.disabled = true;
+            btn.textContent = 'Testing...';
+            statusDiv.classList.add('hidden');
+
+            try {
+                const status = await invoke('test_connection');
+
+                statusDiv.className = status.connected ? 'connection-status success' : 'connection-status error';
+                statusDiv.innerHTML = `
+                    <strong>${status.connected ? '✓ Connected' : '✗ Connection Failed'}</strong>
+                    <p>${status.message}</p>
+                    ${!status.connected ? `
+                        <ul class="error-details">
+                            <li>Authentication: ${status.auth_ok ? '✓ OK' : '✗ Failed'}</li>
+                            <li>Feed Access: ${status.feed_ok ? '✓ OK' : '✗ Failed'}</li>
+                        </ul>
+                        <p class="error-hint">
+                            ${!status.auth_ok ? 'Check your NCTS_CLIENT_ID and NCTS_CLIENT_SECRET in .env file' : 'NCTS API may be temporarily unavailable'}
+                        </p>
+                    ` : ''}
+                `;
+                statusDiv.classList.remove('hidden');
+
+                log(status.connected ? '✓ NCTS connection successful' : `✗ Connection failed: ${status.message}`,
+                    status.connected ? 'success' : 'error');
+            } catch (error) {
+                statusDiv.className = 'connection-status error';
+                statusDiv.innerHTML = `
+                    <strong>✗ Connection Test Failed</strong>
+                    <p>${error}</p>
+                    <p class="error-hint">Ensure you have NCTS credentials configured in your .env file</p>
+                `;
+                statusDiv.classList.remove('hidden');
+                log(`✗ Connection test error: ${error}`, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Test NCTS Connection';
+            }
+        }
+
         // Initialize on load
         document.addEventListener('DOMContentLoaded', async () => {
             log('Application started');
 
             // Add event listeners to top-level buttons
+            document.getElementById('testConnection').addEventListener('click', testConnection);
             document.getElementById('syncAll').addEventListener('click', syncAll);
             document.getElementById('refreshStatus').addEventListener('click', refreshStatus);
             document.getElementById('searchBtn').addEventListener('click', searchTerminology);

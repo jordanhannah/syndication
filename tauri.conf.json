@@ -21,6 +21,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
+        "label": "main",
         "title": "NCTS Syndication",
         "width": 1200,
         "height": 800,
@@ -29,7 +30,10 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' ipc://localhost https://api.healthterminologies.gov.au https://tx.fhir.org"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' ipc://localhost https://api.healthterminologies.gov.au https://tx.fhir.org",
+      "capabilities": [
+        "default"
+      ]
     }
   }
 }

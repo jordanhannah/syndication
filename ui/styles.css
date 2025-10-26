@@ -27,6 +27,18 @@ h1 {
 
 .actions {
     margin-bottom: 30px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+}
+
+.test-connection-btn {
+    background: #6c757d;
+}
+
+.test-connection-btn:hover {
+    background: #5a6268;
 }
 
 button {
@@ -580,4 +592,143 @@ button:disabled {
     color: #dc3545;
     text-align: center;
     padding: 20px;
+}
+
+/* Import Progress - Multi-Phase */
+.import-progress-multi {
+    margin-bottom: 15px;
+}
+
+.phase-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    margin-bottom: 4px;
+    transition: color 0.3s ease;
+}
+
+.phase-item.pending {
+    color: #999;
+}
+
+.phase-item.in-progress {
+    color: #666;
+}
+
+.phase-item.completed {
+    color: #28a745;
+}
+
+.phase-icon {
+    font-size: 14px;
+    min-width: 16px;
+    text-align: center;
+}
+
+.phase-label {
+    flex: 1;
+    font-size: 13px;
+}
+
+.phase-count {
+    font-size: 12px;
+    color: inherit;
+    font-family: 'Courier New', monospace;
+}
+
+/* Old Import Progress (Deprecated) */
+.import-progress {
+    margin-bottom: 15px;
+}
+
+.progress-bar-container {
+    width: 100%;
+    height: 24px;
+    background: #e9ecef;
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 8px;
+}
+
+.progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #0066cc, #0052a3);
+    transition: width 0.3s ease;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 12px;
+    font-weight: 600;
+    min-width: 0;
+}
+
+.progress-text {
+    font-size: 13px;
+    color: #666;
+    text-align: center;
+}
+
+.progress-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(255,255,255,.3);
+    border-radius: 50%;
+    border-top-color: white;
+    animation: spin 1s ease-in-out infinite;
+    vertical-align: middle;
+    margin-right: 6px;
+}
+
+/* Connection Status */
+.connection-status {
+    width: 100%;
+    padding: 15px;
+    border-radius: 6px;
+    margin-top: 15px;
+}
+
+.connection-status.hidden {
+    display: none;
+}
+
+.connection-status.success {
+    background: #d4edda;
+    border: 1px solid #c3e6cb;
+    color: #155724;
+}
+
+.connection-status.error {
+    background: #f8d7da;
+    border: 1px solid #f5c6cb;
+    color: #721c24;
+}
+
+.connection-status strong {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 14px;
+}
+
+.connection-status p {
+    margin: 5px 0;
+    font-size: 13px;
+}
+
+.error-details {
+    margin: 10px 0;
+    padding-left: 20px;
+    font-size: 13px;
+}
+
+.error-hint {
+    margin-top: 10px;
+    padding: 8px;
+    background: rgba(0,0,0,0.05);
+    border-radius: 4px;
+    font-style: italic;
+    font-size: 12px;
 }
