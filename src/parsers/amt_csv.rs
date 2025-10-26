@@ -25,6 +25,17 @@ struct ColumnPair {
 pub struct AmtCsvParser;
 
 impl AmtCsvParser {
+    /// Count total AMT codes in a CSV file without importing
+    /// Used for accurate progress tracking during import
+    pub fn count_codes<P: AsRef<Path>>(path: P) -> Result<usize> {
+        let mut count = 0;
+        Self::parse(path, |_| {
+            count += 1;
+            Ok(())
+        })?;
+        Ok(count)
+    }
+
     /// Parse AMT codes from a CSV file
     /// CSV format is wide-format with multiple product types:
     /// CTPP SCTID, CTPP PT, ARTG_ID, TPP SCTID, TPP PT, TPUU SCTID, TPUU PT, etc.

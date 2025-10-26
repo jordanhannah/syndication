@@ -403,11 +403,33 @@ impl<'a> TerminologyImporter<'a> {
     pub async fn import_amt(&self, csv_path: &Path) -> Result<()> {
         println!("Importing AMT from: {:?}", csv_path);
 
-        // Count lines for accurate progress
+        // Pass 1: Count actual codes (not CSV lines)
+        // AMT CSV is wide-format - each row expands into multiple codes (CTPP, TPP, TPUU, etc.)
         println!("Counting AMT codes...");
-        let amt_total = Self::count_file_lines(csv_path)?;
+
+        self.emit_progress(ImportProgress {
+            phase: "Counting AMT".to_string(),
+            phase_status: "in_progress".to_string(),
+            current: 0,
+            total: None,
+            percentage: 0.0,
+            message: "Counting AMT codes...".to_string(),
+        });
+
+        let amt_total = AmtCsvParser::count_codes(csv_path)
+            .context("Failed to count AMT codes")?;
         println!("Found {} AMT codes to import", amt_total);
 
+        self.emit_progress(ImportProgress {
+            phase: "Counting AMT".to_string(),
+            phase_status: "completed".to_string(),
+            current: amt_total,
+            total: Some(amt_total),
+            percentage: 100.0,
+            message: format!("Found {} AMT codes", amt_total),
+        });
+
+        // Pass 2: Import with accurate progress
         self.emit_progress(ImportProgress {
             phase: "Importing AMT".to_string(),
             phase_status: "in_progress".to_string(),

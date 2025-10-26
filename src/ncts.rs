@@ -250,6 +250,8 @@ impl NctsClient {
         app_handle: Option<tauri::AppHandle>,
     ) -> Result<()> {
         use tauri::Emitter;
+        use futures::StreamExt;
+        use tokio::io::AsyncWriteExt;
 
         println!("Downloading from: {}", url);
 
@@ -278,27 +280,59 @@ impl NctsClient {
             anyhow::bail!("Failed to download: HTTP {}", response.status());
         }
 
-        // Get content length for progress tracking (currently unused but useful for future enhancements)
-        let _total_size = response.content_length().unwrap_or(0);
+        // Get content length for progress tracking
+        let total_size = response.content_length();
 
-        // Download the file
-        let bytes = response.bytes().await
-            .context("Failed to read download bytes")?;
+        // Create file for writing
+        let mut file = tokio::fs::File::create(destination)
+            .await
+            .context("Failed to create destination file")?;
 
-        // Emit download complete progress
-        if let Some(handle) = &app_handle {
-            let size_mb = bytes.len() as f32 / 1_048_576.0;
-            let _ = handle.emit("sync-progress", serde_json::json!({
-                "phase": "Downloading",
-                "message": format!("Downloaded {:.1} MB", size_mb),
-                "percentage": 50.0,
-            }));
+        // Download the file in chunks with progress updates
+        let mut stream = response.bytes_stream();
+        let mut downloaded: u64 = 0;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.context("Failed to read chunk")?;
+
+            // Write chunk to file
+            file.write_all(&chunk)
+                .await
+                .context("Failed to write chunk to file")?;
+
+            downloaded += chunk.len() as u64;
+
+            // Emit progress update
+            if let Some(handle) = &app_handle {
+                let downloaded_mb = downloaded as f64 / 1_048_576.0;
+
+                let (message, percentage) = if let Some(total) = total_size {
+                    let total_mb = total as f64 / 1_048_576.0;
+                    let pct = (downloaded as f64 / total as f64 * 100.0).min(100.0);
+                    (
+                        format!("Downloaded {:.1} MB / {:.1} MB ({:.1}%)", downloaded_mb, total_mb, pct),
+                        pct as f32,
+                    )
+                } else {
+                    // No content length available, just show downloaded amount
+                    (
+                        format!("Downloaded {:.1} MB...", downloaded_mb),
+                        0.0, // Can't calculate percentage without total
+                    )
+                };
+
+                let _ = handle.emit("sync-progress", serde_json::json!({
+                    "phase": "Downloading",
+                    "message": message,
+                    "percentage": percentage,
+                }));
+            }
         }
 
-        tokio::fs::write(destination, bytes).await
-            .context("Failed to write file")?;
+        // Ensure all data is flushed to disk
+        file.flush().await.context("Failed to flush file")?;
 
-        // Emit write complete progress
+        // Emit completion progress
         if let Some(handle) = &app_handle {
             let _ = handle.emit("sync-progress", serde_json::json!({
                 "phase": "Downloaded",
@@ -307,7 +341,7 @@ impl NctsClient {
             }));
         }
 
-        println!("Downloaded to: {:?}", destination);
+        println!("Downloaded to: {:?} ({} bytes)", destination, downloaded);
         Ok(())
     }
 
