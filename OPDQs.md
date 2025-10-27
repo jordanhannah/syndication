@@ -1,106 +1,68 @@
-Enhanced Workflow with Two-Way QR Exchange
+# Offline Patient-Doctor Questionnaire (OPDQ) System
 
-1. Doctor Selects Questionnaire: On the desktop app, the doctor chooses a questionnaire template.
+## Bidirectional QR Code Exchange Protocol
 
-2. Doctor animated QR Code Generation: The app generates a session, including a new public/private key pair. It then creates QR codes containing the questionnaire structure, the doctor's public key, and a unique session ID.
+**Clinician:**
+**add timestamp/more encryption info below?**
 
-3. Patient Scans & Fills: The patient scans this QR code with their tablet, which loads the questionnaire. They then fill out their answers directly on the tablet.
+1. Select questionnaire
+2. Generate animated QR code (Azure session ID, clinician public key, admin telemetry public key, questionnaire definition)
 
-4. On-Device Encryption: The patient's tablet generates a random, one-time AES key and uses it to encrypt the questionnaire responses. It then encrypts that AES key using the doctor's public key (from step 2).
+**Patient:**
 
-5. Animated QR Code Generation: The encrypted responses and the encrypted AES key are combined and encoded into a series of animated QR codes for transmission.
+3. Scan QR code
+4. Complete questionnaire (responses encrypted with AES-256-GCM, session key encrypted with clinician's public key)
+5. Generate animated QR code (Azure session ID, encrypted session key, encrypted responses, encrypted telemetry log)
 
-6. Doctor Scans Responses: The doctor's computer scans the animated QR codes from the patient's tablet.
+**Clinician:**
 
-7. Decryption and Viewing: The doctor's app uses its corresponding private key to decrypt the AES key, and then uses that AES key to decrypt and securely view the patient's answers.
+6. Scan QR code
+7. Decrypt session key with private key, decrypt responses with session key
+8. Generate clinical note
 
-HIPAA Benefits:
+**Administrator (separate process):**
 
-- ✅ No pre-shared secrets - keys exchanged via visual QR
-- ✅ End-to-end encryption - only intended doctor can decrypt
-- ✅ Zero network transmission - complete air-gap
-- ✅ Patient controls sharing - scan only the doctor they choose
-- ✅ Fresh keys per session - can use ephemeral keys
-- ✅ Simple UX - two scans, that's it
+9. Decrypt telemetry log with admin private key (clinician cannot access telemetry)
+10. Review diagnostic events (QR scan success/fail, encryption errors, validation failures)
 
-Marketing:
+## Security & Compliance
 
-"Enterprise-Grade Encryption, Zero Network Risk"
+**"HIPAA compliant Encryption, Zero Network Exposure"**
 
-- ✅ Optional No-PHI mode
-- ✅ RSA-OAEP-4096 for key exchange
-- ✅ AES-256-GCM for data encryption (Only the intended staff can decrypt responses)
+- ✅ 100% offline patient device (zero network exposure)
+- ✅ Air-gapped QR code transmission
+- ✅ Optional de-identified (No-PHI) mode
+- ✅ RSA-OAEP-4096 key exchange (dual keypair: clinician + admin)
+- ✅ AES-256-GCM payload encryption
 - ✅ OS keychain integration
-- ✅ SHA-256 for checksums and audit trails
-- ✅ Web Crypto API usage
-- ✅ QR code 100% offline patient data transmission
-- ✅ HIPAA Compliant
-- ✅ Azure Multi-Factor Authentication/Role-Based Access
-- ✅ Custom Session expiry time
-- ✅ 7-year Encrypted audit logs (optional Azure Upload)
-- ✅ Single-use patient data (deleted post QR scanning)
-- ✅ Staff apps use HTTPS/TLS for Azure access
-- ✅ (Optional) Patient Device 100% Offline (De-identified Audit Logs encrypted/stored locally on-device)
-- ✅ Real-time monitoring of security events
+- ✅ SHA-256 integrity verification
+- ✅ Azure MFA/RBAC authentication
+- ✅ Configurable session expiration
+- ✅ Ephemeral patient data on patient device (auto-deleted post-scan)
+- ✅ HTTPS/TLS for staff Azure connections
+- ✅ Admin-encrypted 7-year telemetry/audit logs (optional Azure sync)
+- ✅ Admin/Security Dashboard for Real-time event monitoring
+- ✅ Library of Copmliant Questionnaires
+- ✅ Sanitized user input, error messages and file paths
 
-Database Schemas
+### Events Captured
 
-## Doctor's Device (Clinician Side - IndexedDB with idb-keyval)
-
-**Architecture**: Uses **IndexedDB** for questionnaire responses/keys with **idb-keyval** simple API wrapper.
-**Tamper Detection**:
-
-- Each audit entry contains `previous_log_hash` (SHA-256 of previous entry)
-- Chain verification: Walk backward through IndexedDB cursor to detect modifications
-- Append-only writes (entries never updated, only added)
-- Integrity check on app startup (iterate all entries, verify hash chain)
-
-**Auto-Deletion Policy**:
-
-- Patient responses auto-delete after viewing + export OR 30 days (whichever comes first)
-- Audit logs retained for 7 years (HIPAA requirement)
-- Background task periodically scans `auto_delete_at` field and deletes expired responses
-- Deleted responses leave audit trail entry with `action = 'deleted'`
-
-**Note**: Encryption keys NEVER stored in IndexedDB - stored in OS keychain only (desktop) or SubtleCrypto with extractable=false (web).
-
-**Note**: `my_responses` store cleared immediately after QR generation. No long-term storage on patient device.
-
-Platform Architecture
-
-## Web Version (SolidJS Standalone)
-
-- **Questionnaire Source**: Downloads from Azure on-demand via HTTPS
-- **OPDQ Storage**: IndexedDB with idb-keyval wrapper
-  - Questionnaire sessions, patient responses, audit logs
-  - Same TypeScript interfaces as desktop version
-  - Browser-native IndexedDB (no polyfills needed)
-- **Encryption**: Web Crypto API (built-in)
-  - RSA-OAEP-4096 + AES-256-GCM for responses
-  - CryptoKey storage with `extractable: false` (non-exportable keys)
-- **Platforms**: Browser (Chrome/Safari/Firefox), Mobile devices (iOS/Android via PWA)
+- QR: `qr_scan_success/failed`, `qr_generation_complete`
+- Encryption: `response_encryption_success/failed`, `session_key_wrap_failed`, `telemetry_encryption_failed`
+- Validation: `questionnaire_validation_failed`, `valueset_validation_failed`, `session_expired`
+- Performance: `qr_scan_duration`, `encryption_duration`, `qr_generation_duration`
+- Errors: `web_crypto_api_error`, `indexeddb_error`, `bc_ur_decode_error`
 
 ## Desktop Version (Tauri)
 
-- **Questionnaire Source**: Bundled in app at compile-time
-- **OPDQ Storage**: IndexedDB (via WebView) with idb-keyval wrapper
-  - Patient responses, sessions, audit logs, questionnaire templates
-  - Persisted to disk by WebView engine (encrypted at OS level on desktop)
-  - 100% shared TypeScript code with web version
+- **Questionnaire Source**: Bundled in app at compile-time and synced with Azure blob storage
+- **Sensitive Information Storage**: redb key-value store + AES-256-GCM + OS keychain + SHA-256
+  - HIPAA-compliant tamper-evident audit logging
+  - Background auto-deletion of expired responses
 - **Terminology Storage**: redb key-value store (Rust native) + Tantivy indexes
   - SNOMED, AMT, LOINC, ValueSets
-  - SQLite for initial import, then loaded into redb for fast lookups
-  - Tantivy indexes built from redb for sub-millisecond search
-- **Encryption**:
-  - Web Crypto API in WebView for OPDQ data (same as web version)
-  - OS keychain for RSA private keys (Tauri keyring API)
-  - Optional: OS-level disk encryption (BitLocker, FileVault)
-- **Additional Features**:
-  - NCTS terminology sync (separate SQLite → redb pipeline)
-  - Tantivy search indexes for terminology lookups (<1ms response time)
-  - HIPAA-compliant tamper-evident audit logging with SHA-256 chain
-  - Background auto-deletion of expired responses
-- **Platforms**: Windows, macOS, Linux
+  - NCTS terminology sync
+- **Platforms**: Windows, macOS, Linux, iOS, android
 
 ## Data Storage Architecture
 
@@ -139,10 +101,7 @@ Frontend SolidJS can wrap results in FHIR ValueSet $expand format if needed.
 
 **Bundle Size Analysis:**
 
-- `idb`: ~4KB gzipped
-- `idb-keyval`: <600 bytes gzipped (even simpler API)
 - `qr-scanner`: ~16KB gzipped
-- **Total OPDQ overhead**: ~100KB gzipped
 
 ## Code Sharing Encouraged between web and app version
 
@@ -277,7 +236,7 @@ All Azure AD authentication events automatically logged:
 
 **M9: Insecure Data Storage:**
 
-- ✅ Already addressed (Web Crypto API application-level encryption + OS disk encryption on desktop)
+- ✅ Already addressed
 - **Enhancement**: Defense-in-depth measures:
   - **Clipboard protection**: Clear clipboard after 30 seconds if PHI copied
   - **Screenshot prevention**: Use Tauri API to disable screenshots on sensitive screens (iOS/Android)
@@ -336,28 +295,3 @@ All Azure AD authentication events automatically logged:
 - Require screen lock with timeout (≤5 minutes idle)
 - Warn if device is jailbroken/rooted (Tauri device integrity check)
 - Enforce device compliance via Azure Conditional Access
-
-### Implementation Priority
-
-**Critical (Implement Before Production):**
-
-1. ✅ Azure AD authentication with MFA
-2. ✅ Role-based access control (RBAC)
-3. ✅ Breach detection alerts (tamper detection, failed auth)
-4. ✅ Privacy consent screen (patient app)
-5. ✅ Secure memory clearing (`zeroize` for keys/PHI)
-
-**High Priority (Next Release):**
-
-1. ⚠️ HSM/Secure Enclave integration (hardware key storage)
-2. ⚠️ Data sovereignty enforcement (Azure Conditional Access geo-blocking)
-3. ⚠️ Screenshot/clipboard protection (platform APIs)
-4. ⚠️ Dependency security scanning (CI/CD integration)
-5. ⚠️ QR visual verification (session ID display)
-
-**Medium Priority (Future Enhancement):**
-
-1. ⚠️ Continuous security monitoring (anomaly detection)
-2. ⚠️ Remote wipe capability (Azure Intune)
-3. ⚠️ Encrypted audit log backup (Azure Blob WORM)
-4. ⚠️ Cryptographic algorithm versioning (future-proofing)

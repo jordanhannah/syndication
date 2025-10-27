@@ -531,27 +531,23 @@ The planned OPDQ feature will enable secure questionnaire workflows between doct
 - **End-to-End Encryption**: RSA/AES hybrid encryption (responses encrypted with doctor's public key)
 - **BC-UR Animated QR**: All responses use fountain-coded multi-frame QR (handles 1KB-100KB+ payloads)
 - **HIPAA Compliance**: No pre-shared secrets, patient controls sharing, ephemeral session keys
-- **Platform Support**: Web version (SolidJS + IndexedDB) and Desktop version (Tauri + SQLCipher)
+- **Platform Support**: Desktop-only (Tauri + SolidJS + SQLCipher) - no web version for security
 
 ### Architecture Plans
 
-**Frontend (Shared - SolidJS):**
+**Frontend (SolidJS in Tauri WebView):**
 - `BCURScanner.tsx` - Multi-frame QR scanner using qr-scanner library
 - `BCURGenerator.tsx` - Rotating animated QR display (10-15 FPS)
 - `QuestionnaireForm.tsx` - Patient questionnaire UI with validation
 - `ResponseViewer.tsx` - Clinician response viewer
 - Web Crypto API for all cryptographic operations (RSA-OAEP-4096, AES-256-GCM)
 
-**Backend (Desktop Only - Rust/Tauri):**
+**Backend (Rust/Tauri):**
 - SQLCipher for encrypted storage of patient responses
 - Questionnaire templates bundled at compile-time
 - Integration with existing NCTS terminology for ValueSet-driven questions
 - Automatic data deletion after viewing/exporting responses
-
-**Web Version Differences:**
-- Questionnaires downloaded from Azure on-demand
-- IndexedDB for temporary session storage
-- Same SolidJS components and Web Crypto API
+- OS keychain integration for private key storage
 
 ### Planned Database Extensions
 
@@ -590,18 +586,10 @@ CREATE TABLE questionnaires (
 );
 ```
 
-**Patient's Device (Web/Mobile):**
-```sql
-CREATE TABLE active_sessions (
-    id TEXT PRIMARY KEY,
-    questionnaire_id TEXT NOT NULL,
-    doctor_name TEXT,
-    doctor_public_key TEXT NOT NULL,
-    scanned_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL,
-    questionnaire_data TEXT NOT NULL  -- JSON definition
-);
-```
+**Patient's Device (Desktop):**
+- Same Tauri app as doctor's device
+- Uses IndexedDB for temporary session storage (cleared after QR generation)
+- No persistent patient data storage
 
 ### Performance Characteristics
 
@@ -699,13 +687,7 @@ const qrPayload = {
 - [ ] Autocomplete using local terminology search
 - [ ] Questionnaire builder UI
 
-**Phase 3**: Web Version
-- [ ] IndexedDB persistence layer
-- [ ] Azure questionnaire repository
-- [ ] Progressive Web App (PWA) support
-- [ ] Mobile-optimized UI
-
-**Phase 4**: Advanced Features
+**Phase 3**: Advanced Features
 - [ ] Complex question logic (conditional display)
 - [ ] Multi-page questionnaires
 - [ ] Response export formats (FHIR Questionnaire Response)
@@ -713,11 +695,11 @@ const qrPayload = {
 
 ### Development Considerations
 
-**Code Sharing Strategy:**
-- 100% shared SolidJS components between web and desktop
-- 100% shared Web Crypto API code
-- Platform-specific: Storage layer only (IndexedDB vs Tauri commands)
-- Desktop-only: NCTS sync remains separate module
+**Code Architecture:**
+- SolidJS frontend in Tauri WebView
+- Web Crypto API for all encryption
+- Rust backend for SQLCipher database operations
+- NCTS terminology sync remains separate module
 
 **Testing Strategy:**
 - Test questionnaire flow with smallest payload first (~1KB, 1 frame)
