@@ -1,21 +1,18 @@
 Enhanced Workflow with Two-Way QR Exchange
 
-Phase 1: Setup (Patient → Doctor)
+1. Doctor Selects Questionnaire: On the desktop app, the doctor chooses a questionnaire template.
 
-1. Patient's tablet scans QR code from doctor's computer
-2. QR contains:
+2. Doctor animated QR Code Generation: The app generates a session, including a new public/private key pair. It then creates QR codes containing the questionnaire structure, the doctor's public key, and a unique session ID.
 
-   - Questionnaire definition (questions, options, validation rules)
-   - Doctor's public encryption key
-   - Session identifier
-   - Clinic/doctor metadata
+3. Patient Scans & Fills: The patient scans this QR code with their tablet, which loads the questionnaire. They then fill out their answers directly on the tablet.
 
-Phase 2: Completion (Patient → Doctor)
+4. On-Device Encryption: The patient's tablet generates a random, one-time AES key and uses it to encrypt the questionnaire responses. It then encrypts that AES key using the doctor's public key (from step 2).
 
-3. Patient answers questionnaire on tablet
-4. Responses encrypted using doctor's public key
-5. Patient's tablet generates animated QR sequence with encrypted responses (BC-UR format)
-6. Doctor's computer scans animated QR sequence and decrypts with private key
+5. Animated QR Code Generation: The encrypted responses and the encrypted AES key are combined and encoded into a series of animated QR codes for transmission.
+
+6. Doctor Scans Responses: The doctor's computer scans the animated QR codes from the patient's tablet.
+
+7. Decryption and Viewing: The doctor's app uses its corresponding private key to decrypt the AES key, and then uses that AES key to decrypt and securely view the patient's answers.
 
 HIPAA Benefits:
 
@@ -26,313 +23,341 @@ HIPAA Benefits:
 - ✅ Fresh keys per session - can use ephemeral keys
 - ✅ Simple UX - two scans, that's it
 
-QR Code #1: Doctor → Patient (Session Initiation)
+Marketing:
 
-{
-"type": "questionnaire_session",
-"version": 1,
-"session_id": "uuid-v4",
-"timestamp": 1729900800,
-"doctor": {
-"id": "dr-uuid",
-"name": "Dr. Smith", // optional, for patient confirmation
-"clinic": "Melbourne Medical Centre" // optional
-},
-"questionnaire": {
-"id": "diabetes-screening-v2",
-"title": "Diabetes Screening Questionnaire",
-"version": "2.0",
-"questions": [
-{
-"id": "q1",
-"text": "Do you have a family history of diabetes?",
-"type": "boolean",
-"required": true
-},
-{
-"id": "q2",
-"text": "What is your activity level?",
-"type": "choice",
-"options": ["Sedentary", "Moderate", "Active"],
-"required": true
-}
-// ... more questions
-]
-},
-"encryption": {
-"algorithm": "RSA-OAEP-4096", // or "X25519" for smaller QR
-"public_key": "base64_public_key"
-},
-"expires_at": 1729904400 // 1 hour validity
-}
+"Enterprise-Grade Encryption, Zero Network Risk"
 
-QR Code #2: Patient → Doctor (Response Submission - BC-UR Animated QR)
-
-Note: Response is ALWAYS transmitted via BC-UR animated QR sequence (fountain-coded frames).
-This eliminates format selection logic and handles all payload sizes gracefully.
-
-BC-UR Frame Format:
-ur:crypto-response/1-5/lpadascf... (frame 1 of ~5)
-ur:crypto-response/2-5/lpaoascf... (frame 2 of ~5)
-ur:crypto-response/3-5/lpaxascf... (frame 3 of ~5)
-...
-
-Each frame contains:
-{
-"session_id": "same-uuid-from-qr1",
-"questionnaire_id": "diabetes-screening-v2",
-"encrypted_payload": "base64_encrypted_data_chunk",
-"encryption": {
-"algorithm": "RSA-OAEP-4096",
-"ephemeral_key": "base64_aes_key_encrypted_with_rsa" // hybrid encryption
-}
-}
-
-Hybrid Encryption Strategy (used for all questionnaires):
-
-1. Generate random AES-256-GCM key
-2. Encrypt responses with AES key
-3. Encrypt AES key with doctor's RSA public key
-4. BC-UR encodes the encrypted payload into fountain-coded frames
-
-Benefits:
-- Small questionnaires (~1KB): 1 frame, scans in ~100ms
-- Medium questionnaires (~3KB): 2 frames, scans in ~200ms
-- Large questionnaires (~10KB): 6 frames, scans in ~600ms
-- No size limits, no format guessing, single code path
+- ✅ Optional No-PHI mode
+- ✅ RSA-OAEP-4096 for key exchange
+- ✅ AES-256-GCM for data encryption (Only the intended staff can decrypt responses)
+- ✅ OS keychain integration
+- ✅ SHA-256 for checksums and audit trails
+- ✅ Web Crypto API usage
+- ✅ QR code 100% offline patient data transmission
+- ✅ HIPAA Compliant
+- ✅ Azure Multi-Factor Authentication/Role-Based Access
+- ✅ Custom Session expiry time
+- ✅ 7-year Encrypted audit logs (optional Azure Upload)
+- ✅ Single-use patient data (deleted post QR scanning)
+- ✅ Staff apps use HTTPS/TLS for Azure access
+- ✅ (Optional) Patient Device 100% Offline (De-identified Audit Logs encrypted/stored locally on-device)
+- ✅ Real-time monitoring of security events
 
 Database Schemas
 
-Doctor's Device (Clinician Side):
+## Doctor's Device (Clinician Side - IndexedDB with idb-keyval)
 
--- Store active sessions
-CREATE TABLE questionnaire_sessions (
-id TEXT PRIMARY KEY, -- UUID
-questionnaire_id TEXT NOT NULL,
-public_key TEXT NOT NULL,
-private_key_ref TEXT NOT NULL, -- reference to OS keychain
-created_at TEXT NOT NULL,
-expires_at TEXT NOT NULL,
-status TEXT NOT NULL DEFAULT 'pending' -- pending, completed, expired
-);
+**Architecture**: Uses **IndexedDB** for questionnaire responses/keys with **idb-keyval** simple API wrapper.
+**Tamper Detection**:
 
--- Store received responses (encrypted at rest with SQLCipher)
-CREATE TABLE patient_responses (
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-session_id TEXT NOT NULL,
-questionnaire_id TEXT NOT NULL,
-received_at TEXT NOT NULL,
-encrypted_responses BLOB NOT NULL, -- double-encrypted: AES + SQLCipher
-encryption_nonce BLOB NOT NULL,
-clinician_id TEXT NOT NULL,
-viewed BOOLEAN DEFAULT 0,
-exported BOOLEAN DEFAULT 0,
-FOREIGN KEY (session_id) REFERENCES questionnaire_sessions(id)
-);
+- Each audit entry contains `previous_log_hash` (SHA-256 of previous entry)
+- Chain verification: Walk backward through IndexedDB cursor to detect modifications
+- Append-only writes (entries never updated, only added)
+- Integrity check on app startup (iterate all entries, verify hash chain)
 
--- Audit log
-CREATE TABLE access_log (
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-response_id INTEGER NOT NULL,
-action TEXT NOT NULL, -- 'received', 'viewed', 'exported', 'deleted'
-clinician_id TEXT NOT NULL,
-timestamp TEXT NOT NULL,
-device_id TEXT NOT NULL,
-FOREIGN KEY (response_id) REFERENCES patient_responses(id)
-);
+**Auto-Deletion Policy**:
 
--- Questionnaire templates
-CREATE TABLE questionnaires (
-id TEXT PRIMARY KEY,
-title TEXT NOT NULL,
-version TEXT NOT NULL,
-definition TEXT NOT NULL, -- JSON questionnaire schema
-created_at TEXT NOT NULL,
-updated_at TEXT NOT NULL,
-active BOOLEAN DEFAULT 1
-);
+- Patient responses auto-delete after viewing + export OR 30 days (whichever comes first)
+- Audit logs retained for 7 years (HIPAA requirement)
+- Background task periodically scans `auto_delete_at` field and deletes expired responses
+- Deleted responses leave audit trail entry with `action = 'deleted'`
 
-Patient's Device (Patient Side):
+**Note**: Encryption keys NEVER stored in IndexedDB - stored in OS keychain only (desktop) or SubtleCrypto with extractable=false (web).
 
--- Store questionnaire sessions (temporary)
-CREATE TABLE active_sessions (
-id TEXT PRIMARY KEY,
-questionnaire_id TEXT NOT NULL,
-doctor_name TEXT,
-clinic_name TEXT,
-doctor_public_key TEXT NOT NULL,
-scanned_at TEXT NOT NULL,
-expires_at TEXT NOT NULL,
-questionnaire_data TEXT NOT NULL -- JSON definition
-);
-
--- Store patient's responses before QR generation (optional, can clear after)
-CREATE TABLE my_responses (
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-session_id TEXT NOT NULL,
-questionnaire_id TEXT NOT NULL,
-responses TEXT NOT NULL, -- encrypted JSON
-created_at TEXT NOT NULL,
-qr_generated BOOLEAN DEFAULT 0,
-FOREIGN KEY (session_id) REFERENCES active_sessions(id)
-);
+**Note**: `my_responses` store cleared immediately after QR generation. No long-term storage on patient device.
 
 Platform Architecture
 
 ## Web Version (SolidJS Standalone)
 
-- **Questionnaire Source**: Downloads from Azure on-demand
-- **Storage**: IndexedDB for temporary sessions
+- **Questionnaire Source**: Downloads from Azure on-demand via HTTPS
+- **OPDQ Storage**: IndexedDB with idb-keyval wrapper
+  - Questionnaire sessions, patient responses, audit logs
+  - Same TypeScript interfaces as desktop version
+  - Browser-native IndexedDB (no polyfills needed)
 - **Encryption**: Web Crypto API (built-in)
-- **Platforms**: Browser (Chrome/Safari/Firefox), Mobile devices (iOS/Android)
+  - RSA-OAEP-4096 + AES-256-GCM for responses
+  - CryptoKey storage with `extractable: false` (non-exportable keys)
+- **Platforms**: Browser (Chrome/Safari/Firefox), Mobile devices (iOS/Android via PWA)
 
 ## Desktop Version (Tauri)
 
 - **Questionnaire Source**: Bundled in app at compile-time
-- **Storage**: SQLCipher encrypted database, auto-deletes after viewing/exporting
-- **Encryption**: Web Crypto API in WebView (same code as web version)
-- **Additional Features**: NCTS terminology sync (separate SQLite database)
+- **OPDQ Storage**: IndexedDB (via WebView) with idb-keyval wrapper
+  - Patient responses, sessions, audit logs, questionnaire templates
+  - Persisted to disk by WebView engine (encrypted at OS level on desktop)
+  - 100% shared TypeScript code with web version
+- **Terminology Storage**: redb key-value store (Rust native) + Tantivy indexes
+  - SNOMED, AMT, LOINC, ValueSets
+  - SQLite for initial import, then loaded into redb for fast lookups
+  - Tantivy indexes built from redb for sub-millisecond search
+- **Encryption**:
+  - Web Crypto API in WebView for OPDQ data (same as web version)
+  - OS keychain for RSA private keys (Tauri keyring API)
+  - Optional: OS-level disk encryption (BitLocker, FileVault)
+- **Additional Features**:
+  - NCTS terminology sync (separate SQLite → redb pipeline)
+  - Tantivy search indexes for terminology lookups (<1ms response time)
+  - HIPAA-compliant tamper-evident audit logging with SHA-256 chain
+  - Background auto-deletion of expired responses
 - **Platforms**: Windows, macOS, Linux
 
-Implementation Dependencies
+## Data Storage Architecture
 
-## JavaScript/TypeScript (Shared - Both Platforms)
+**Three Specialized Search Indexes:**
 
-```json
-{
-  "dependencies": {
-    "solid-js": "^1.8.0",
-    "qr-scanner": "^1.4.2", // QR scanning
-    "qrcode": "^1.5.3", // QR generation
-    "@ngraveio/bc-ur": "^1.1.12", // Animated QR (fountain codes)
-    "uuid": "^10.0.0"
-  }
-}
-```
+1. **AMT Medications Index** (~10MB RAM)
 
-**Note**: Web Crypto API is built-in (no crypto libraries needed)
+   - All AMT codes (CTPP, TPP, TPUU, MPP, MPUU, MP)
+   - Fields: code, preferred_term, code_type
+   - Trigram tokenizer for typo tolerance ("paracetamol" → "paracetmol")
 
-## Rust (Desktop/Tauri Only)
+2. **SNOMED Problem/Diagnosis Refset** (~50MB RAM)
 
-```toml
-[dependencies]
-rusqlite = { version = "0.32", features = ["bundled-sqlcipher"] }
-keyring = "3.8"                        # Store DB encryption key in OS keychain
-uuid = { version = "1.11", features = ["v4", "serde"] }
-serde_json = "1.0"
-```
+   - Filtered by Australian Problem/Diagnosis refset (32570571000036108)
+   - Used for past medical history autocomplete
+   - Fields: concept_id, FSN, synonyms
+   - Prefix-boosted ranking (exact matches first)
 
-**Note**: Crypto handled by Web Crypto API in frontend, not Rust
+3. **SNOMED All Terms + LOINC** (~250MB RAM)
+   - All active SNOMED descriptions
+   - LOINC codes (when available via NCTS)
+   - ValueSet metadata for search
+   - Fields: code, system, display, terminology_type
 
-BC-UR Animated QR Performance (using qr-scanner)
+**Index Build Process:**
 
-Performance Characteristics
+- Built in-memory at app startup from redb persistence layer
+- Incremental updates after terminology sync
+- Serialized to disk for fast cold-start (optional optimization)
 
-- Speed: Commercial scanners like Scanbot can scan in under 0.04s (40ms) per frame
-- BC-UR Record: The fastest recorded transfer of ~13KB using fountain-coded animated QR was 501ms (half a second) at
-  12 FPS with 1850 bytes per QR code
-- Throughput: This translates to approximately 25 kbps
-- Frame Rate: Typical implementations run at 10-15 FPS for reliable scanning
+### FHIR-Compliant Search API
 
-Why qr-scanner Works Well
+While Tantivy handles the heavy lifting, search commands remain FHIR-compatible from front end point of view. e.g. SolidJS will know 'if online_terminology_server = true do this vs = false do highly optimised tantivy search'.
 
-- WebWorker-based: Runs in a background thread, keeping UI responsive
-- High detection rate: 2-3x (up to 8x) better than older libraries like jsqrcode
-- Low overhead: 16 KB gzipped, minimal performance impact
+Frontend SolidJS can wrap results in FHIR ValueSet $expand format if needed.
 
-Key Advantage of BC-UR Fountain Codes
+**Bundle Size Analysis:**
 
-- Stateless scanning: Can start scanning at any frame (don't need frame 1)
-- Missing frame tolerance: Each frame contains redundant data, so you don't need every single frame
-- Probabilistic completion: You need slightly more than K frames to decode K source blocks
+- `idb`: ~4KB gzipped
+- `idb-keyval`: <600 bytes gzipped (even simpler API)
+- `qr-scanner`: ~16KB gzipped
+- **Total OPDQ overhead**: ~100KB gzipped
 
-Architecture Decision: BC-UR Only (No Single QR Mode)
+## Code Sharing Encouraged between web and app version
 
-This app uses BC-UR animated QR for ALL response submissions (no single static QR mode).
+### Role-Based Access Control (RBAC)
 
-Benefits:
-- Eliminates format selection logic (no size estimation needed)
-- Single code path for both patient and doctor apps
-- Handles all payload sizes gracefully (1 KB to 100 KB+)
-- Minimal overhead for small payloads (1 frame = ~100ms scan, barely slower than static QR)
-- Future-proof for complex questionnaires
+**Azure AD App Roles:**
 
-Trade-offs:
-- Slightly slower for tiny questionnaires (~50ms overhead for BC-UR decode)
-- Requires 96 KB bundle (qr-scanner + qrcode + bc-ur) vs 66 KB for single QR only
-- Camera must stay steady for 0.5-2 seconds (vs quick snapshot for static QR)
+Roles defined in Azure AD App Registration manifest:
 
-Conclusion: The architectural simplicity and elimination of edge cases outweigh the minor performance cost.
+**Permission Matrix:**
 
-SolidJS Implementation Patterns
+| Action                              | Clinician     | Administrator | Auditor  | DPO      |
+| ----------------------------------- | ------------- | ------------- | -------- | -------- |
+| **View assigned patient responses** | ✅            | ✅            | ❌       | ✅       |
+| **Export patient responses**        | ✅ (own only) | ✅ (all)      | ❌       | ✅       |
+| **Delete patient responses**        | ❌            | ❌            | ❌       | ✅       |
+| **Create questionnaire sessions**   | ✅            | ✅            | ❌       | ❌       |
+| **Manage questionnaire templates**  | ❌            | ✅            | ❌       | ❌       |
+| **View audit logs**                 | ❌ (own only) | ✅ (all)      | ✅ (all) | ✅ (all) |
+| **Export audit logs**               | ❌            | ❌            | ✅       | ✅       |
+| **Manage user roles**               | ❌            | ✅            | ❌       | ❌       |
+| **Configure retention policies**    | ❌            | ✅            | ❌       | ✅       |
+| **View breach reports**             | ❌            | ❌            | ❌       | ✅       |
+| **Initiate emergency data wipe**    | ❌            | ❌            | ❌       | ✅       |
 
-## Key Patterns
+**Azure AD Conditional Access Policies (Recommended):**
 
-1. **Camera Lifecycle**: Use `createEffect()` to reactively control camera state
-2. **BC-UR Decoder**: Always use BC-UR decoder for all responses (no single QR mode)
-3. **Progressive Init**: Show loading state while libraries initialize
-4. **Progress Feedback**: Show frame count and percentage for multi-frame responses
+- **Require MFA** for all OPDQ app access
+- **Require compliant device** (Intune-managed or domain-joined)
+- **Block legacy authentication** (only modern OAuth2)
+- **Restrict by IP range** (clinic network only, optional)
+- **Require password change** every 90 days for Administrators/DPO
 
-## Component Structure
+**Audit Integration:**
 
-```
-src/
-├── components/
-│   ├── BCURScanner.tsx          // BC-UR frame scanner (always animated)
-│   ├── BCURGenerator.tsx        // BC-UR frame display (rotating QR)
-│   ├── QuestionnaireForm.tsx    // Patient questionnaire UI
-│   └── ResponseViewer.tsx       // Clinician response viewer
-├── utils/
-│   ├── crypto.ts                // Web Crypto API (RSA/AES hybrid encryption)
-│   ├── bcur.ts                  // BC-UR encoding/decoding wrapper
-│   ├── storage.ts               // IndexedDB (web) / Tauri commands (desktop)
-│   └── qr-protocol.ts           // QR payload schemas
-└── App.tsx
-```
+All Azure AD authentication events automatically logged:
 
-## Code Sharing Strategy
+- Sign-ins (successful/failed)
+- MFA challenges
+- Token refresh events
+- Conditional Access policy evaluations
+- Anomalous activity detection
 
-- **100% shared**: SolidJS components, Web Crypto API, BC-UR handling
-- **Platform-specific**: Storage persistence only (IndexedDB vs Tauri SQL commands)
-- **Desktop-only**: NCTS terminology sync (separate Rust module)
+**Real-time monitoring of security events:**
 
-## Simplified Flow (BC-UR Only)
+- Failed decryption attempts (potential brute-force attacks)
+- Repeated authentication failures (credential stuffing)
+- Unusual access patterns (time-of-day anomalies, geographic anomalies via Azure AD)
+- Export volume spikes (potential data exfiltration)
+- Audit log integrity violations (tamper detection)
+- **Implementation**: Alert administrator on threshold breach (e.g., 5 failed decryptions in 10 minutes)
 
-**Patient App:**
-```typescript
-// 1. Encrypt responses with hybrid encryption
-const aesKey = crypto.getRandomValues(new Uint8Array(32));
-const encryptedData = await aesEncrypt(responses, aesKey);
-const encryptedKey = await rsaEncrypt(aesKey, doctorPublicKey);
+### Australian Privacy Principles (APP 11.3 - 2024)
 
-// 2. Always encode with BC-UR (no format decision)
-const encoder = new UREncoder(encryptedPayload, 1850);
-const totalFrames = encoder.fragmentsLength;
+[Data Breach Response Plan](https://www.oaic.gov.au/privacy/privacy-guidance-for-organisations-and-government-agencies/preventing-preparing-for-and-responding-to-data-breaches/data-breach-preparation-and-response/part-2-preparing-a-data-breach-response-plan)
 
-// 3. Display rotating frames
-setInterval(() => {
-  const frame = encoder.nextPart();
-  displayQR(frame);
-}, 100); // 10 FPS
-```
+**Breach Notification:**
 
-**Doctor App:**
-```typescript
-// Always use BC-UR decoder (no format detection)
-const decoder = new URDecoder();
+- ✅ Must notify OAIC within 30 days of eligible data breach
+- **Recommendation**: Add automated breach detection alerts:
+  - Audit log tampering detected (SHA-256 chain verification fails)
+  - Encryption key compromise detected (unusual key access patterns)
+  - Unauthorized export attempts (export by non-authorized role)
+  - Data exfiltration detected (large volume exports outside business hours)
+- **Implementation**: Email/SMS alert to Data Protection Officer + automatic incident report generation
 
-scanner.start(frame => {
-  decoder.receivePart(frame);
+**Data Sovereignty:**
 
-  // Show progress
-  const progress = decoder.estimatedPercentComplete();
-  updateUI(`Scanning: ${progress}% - Frame ${decoder.receivedPartCount()}`);
+- ⚠️ Health data must remain in Australia (for Australian patients)
+- **Recommendation**: Add region enforcement:
+  - Check device location before storing patient responses (optional, privacy consideration)
+  - Use Azure Australia regions for cloud backups (if implemented)
+  - Warn administrators if device detected outside Australia (Conditional Access policy)
+- **Implementation**: Azure Conditional Access → Block access from outside Australia
 
-  if (decoder.isComplete()) {
-    scanner.stop();
-    const encryptedPayload = decoder.resultUR();
-    const responses = await decryptWithPrivateKey(encryptedPayload);
-    displayResponses(responses);
-  }
-});
-```
+**Explicit Consent:**
+
+- ✅ Must obtain explicit consent before collecting health data
+- **Recommendation**: Add consent screen in patient app:
+  - Clear explanation of data collection ("Your responses will be encrypted and shared only with Dr. [Name]")
+  - Checkbox for explicit consent ("I consent to collection of my health information")
+  - Option to withdraw consent (refuse to scan QR, responses never transmitted)
+- **Implementation**: SolidJS consent component before questionnaire display
+
+### OWASP Mobile Top 10 (2024)
+
+**M1: Improper Credential Usage:**
+
+- ✅ Private keys stored in OS keychain (secure)
+- ⚠️ **Enhancement**: Use Hardware Security Module (HSM) when available:
+  - **iOS**: Secure Enclave for cryptographic operations
+  - **Android**: StrongBox Keymaster (hardware-backed)
+  - **macOS**: T2/M-series Secure Enclave
+  - **Windows**: TPM 2.0 for key storage
+- **Benefit**: Keys never leave hardware, resistant to extraction even with root access
+
+**M2: Inadequate Supply Chain Security:**
+
+- **Recommendation**: Add to CI/CD pipeline:
+  - `cargo-audit` - Detect vulnerable Rust dependencies
+  - `cargo-deny` - Enforce license and security policies
+  - `npm audit` - Check JavaScript dependencies
+  - Pin exact versions (avoid `^` or `~` wildcards)
+  - Verify checksum of downloaded binaries (Tantivy, redb)
+- **Implementation**: GitHub Actions workflow on every commit
+
+**M5: Insecure Communication:**
+
+- ✅ Already addressed (complete air-gap via QR, no network transmission)
+- **Enhancement**: Add QR code visual verification:
+  - Show first 6 + last 6 characters of session ID on both devices
+  - Patient confirms match before submitting responses ("Does your code match: ABC123...XYZ789?")
+  - Prevents QR substitution attacks (attacker replaces doctor's QR with their own)
+
+**M6: Inadequate Privacy Controls:**
+
+- **Recommendation**: Add privacy notice in patient app:
+  - **Who can access**: "Only Dr. [Name] can decrypt your responses"
+  - **Retention period**: "Responses auto-deleted after 30 days or when viewed + exported"
+  - **Right to deletion**: "You can refuse to scan the QR code; no data is stored until you submit"
+  - **Encryption details**: "Your responses are encrypted with military-grade RSA-4096 + AES-256"
+- **Implementation**: Modal dialog before questionnaire, dismissable after reading
+
+**M8: Security Misconfiguration:**
+
+- **Recommendation**: Harden Tauri configuration:
+  - ✅ Disable developer tools in production builds (`tauri.conf.json`: `devPath` only in dev)
+  - ✅ Disable navigation to external URLs (`allowlist.window.open: false`)
+  - ✅ Enable Content Security Policy (CSP) strict mode (no inline scripts)
+  - ✅ Disable clipboard access from WebView for PHI screens
+  - ⚠️ Add: Disable screenshots on PHI screens (platform-specific APIs)
+
+**M9: Insecure Data Storage:**
+
+- ✅ Already addressed (Web Crypto API application-level encryption + OS disk encryption on desktop)
+- **Enhancement**: Defense-in-depth measures:
+  - **Clipboard protection**: Clear clipboard after 30 seconds if PHI copied
+  - **Screenshot prevention**: Use Tauri API to disable screenshots on sensitive screens (iOS/Android)
+  - **Task switcher obfuscation**: Blur PHI when app goes to background
+  - **Memory protection**: Use `zeroize` crate to clear decrypted PHI from memory (Rust side)
+
+**M10: Insufficient Cryptography:**
+
+- ✅ Already using industry-standard algorithms (RSA-OAEP-4096, AES-256-GCM, SHA-256)
+- **Enhancement**: Add cryptographic agility:
+  - Version all encrypted blobs (allow future algorithm migration)
+  - Support algorithm upgrades without breaking changes
+  - Monitor NIST/OWASP for deprecated algorithms (SHA-1, MD5, RSA-2048)
+  - Alert on weak algorithm detection
+
+### Additional Best Practices
+
+**Secure Coding (OWASP):**
+
+**Input Validation:**
+
+- Sanitize all questionnaire responses before storage (prevent XSS injection in IndexedDB)
+- Validate BC-UR frame format before decoding (reject malformed frames)
+- Limit response field lengths (prevent DoS via memory exhaustion)
+- Whitelist allowed characters in session IDs, questionnaire IDs (UUID v4 format)
+
+**Memory Safety:**
+
+- Zero-out sensitive data after use (encryption keys, decrypted PHI)
+- Use `zeroize` crate for secure memory clearing in Rust (prevents data remanence)
+- JavaScript: Clear sensitive variables after use (set to `null`)
+- Avoid logging decrypted responses (even in debug mode)
+- Clear ArrayBuffers after encryption/decryption operations
+
+**Operational Security:**
+
+**Backup & Recovery:**
+
+- Encrypted backups of audit logs (7-year retention for HIPAA/APP compliance)
+- Export audit logs to immutable storage (Azure Blob WORM, S3 Glacier)
+- Test recovery procedures annually (restore audit logs, verify integrity)
+- Separate backup encryption key from operational key
+
+**Incident Response:**
+
+- Document procedure for lost/stolen devices
+- Remote wipe capability for compromised devices (Azure Intune integration)
+- Revoke encryption keys on device compromise (rotate master key, re-encrypt data)
+- Notify affected patients within 60 days (HIPAA Breach Notification Rule)
+
+**Physical Security (APP Compliance):**
+
+**Device Security:**
+
+- Require device encryption (OS-level): BitLocker (Windows), FileVault (macOS)
+- Require screen lock with timeout (≤5 minutes idle)
+- Warn if device is jailbroken/rooted (Tauri device integrity check)
+- Enforce device compliance via Azure Conditional Access
+
+### Implementation Priority
+
+**Critical (Implement Before Production):**
+
+1. ✅ Azure AD authentication with MFA
+2. ✅ Role-based access control (RBAC)
+3. ✅ Breach detection alerts (tamper detection, failed auth)
+4. ✅ Privacy consent screen (patient app)
+5. ✅ Secure memory clearing (`zeroize` for keys/PHI)
+
+**High Priority (Next Release):**
+
+1. ⚠️ HSM/Secure Enclave integration (hardware key storage)
+2. ⚠️ Data sovereignty enforcement (Azure Conditional Access geo-blocking)
+3. ⚠️ Screenshot/clipboard protection (platform APIs)
+4. ⚠️ Dependency security scanning (CI/CD integration)
+5. ⚠️ QR visual verification (session ID display)
+
+**Medium Priority (Future Enhancement):**
+
+1. ⚠️ Continuous security monitoring (anomaly detection)
+2. ⚠️ Remote wipe capability (Azure Intune)
+3. ⚠️ Encrypted audit log backup (Azure Blob WORM)
+4. ⚠️ Cryptographic algorithm versioning (future-proofing)
