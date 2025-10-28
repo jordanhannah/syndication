@@ -4,19 +4,25 @@ mod import;
 mod ncts;
 mod parsers;
 mod queries;
+mod search;
 mod storage;
+
+fn main() {
+    run();
+}
 
 use auth::TokenManager;
 use commands::{
     cleanup_ghost_versions, delete_all_terminology_data, delete_terminology_data,
     delete_terminology_file, expand_valueset, fetch_all_versions, fetch_latest_version,
     get_all_local_latest, get_detailed_storage_info, get_local_latest, get_local_versions,
-    get_storage_stats, import_terminology, list_valuesets, lookup_code, search_terminology,
+    import_terminology, list_valuesets, lookup_code, search_terminology,
     sync_all_terminologies, sync_terminology, test_connection, validate_code, AppState,
-};
+}; // Note: get_storage_stats temporarily disabled during redb migration
 use directories::ProjectDirs;
 use import::TerminologyImporter;
 use ncts::NctsClient;
+use search::TerminologySearch;
 use storage::TerminologyStorage;
 use std::sync::Arc;
 use tauri::Manager;
@@ -41,18 +47,21 @@ pub fn run() {
                 .expect("Failed to get project directories");
 
             let data_dir = project_dirs.data_dir();
-            let db_path = data_dir.join("syndication.db");
+            let db_path = data_dir.join("syndication.redb");
             let terminology_data_dir = data_dir.join("terminology");
+            let index_dir = data_dir.join("indexes");
 
             println!("Database path: {:?}", db_path);
             println!("Data directory: {:?}", terminology_data_dir);
+            println!("Index directory: {:?}", index_dir);
 
-            // Initialize storage
-            let storage = tauri::async_runtime::block_on(async {
-                TerminologyStorage::new(db_path, terminology_data_dir)
-                    .await
-                    .expect("Failed to initialize storage")
-            });
+            // Initialize storage (redb)
+            let storage = TerminologyStorage::new(db_path, terminology_data_dir)
+                .expect("Failed to initialize storage");
+
+            // Initialize Tantivy search indexes
+            let searcher = TerminologySearch::new(&index_dir)
+                .expect("Failed to initialize search indexes");
 
             // Initialize token manager from environment variables
             let token_manager = TokenManager::from_env()
@@ -66,6 +75,7 @@ pub fn run() {
             let state = AppState {
                 ncts_client,
                 storage: Arc::new(Mutex::new(storage)),
+                searcher: Arc::new(Mutex::new(searcher)),
             };
 
             app.manage(state);
@@ -86,18 +96,14 @@ pub fn run() {
             expand_valueset,
             validate_code,
             list_valuesets,
-            get_storage_stats,
             get_detailed_storage_info,
             delete_terminology_file,
             delete_terminology_data,
             delete_all_terminology_data,
             test_connection,
             cleanup_ghost_versions,
+            // get_storage_stats temporarily disabled during redb migration
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-fn main() {
-    run();
 }

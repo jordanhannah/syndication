@@ -4,37 +4,304 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Tauri desktop application for syncing Australian clinical terminology standards from the National Clinical Terminology Service (NCTS) using Atom feed syndication.
+A Tauri desktop application for syncing Australian clinical terminology standards from the National Clinical Terminology Service (NCTS) using Atom feed syndication. This Tauri Project will eventually be combined with the solidJS front end to create OPDQS: Offline Patient-Doctor Questionnaires System/Outpatient Department Questionnaires.
 
-**Supported Terminologies:**
-- **SNOMED CT-AU SNAPSHOT** - RF2 SNAPSHOT format only (~500MB+, quarterly updates)
-- **AMT CSV** - CSV format only (~50MB, monthly updates)
-- **NCTS FHIR R4 Bundles** - Value Sets in JSON format (<10MB, as-needed updates)
+## Stack
 
-**Not Supported:**
-- SNOMED DELTA format (not exposed by NCTS syndication feed)
-- LOINC (proprietary binary format only, not available via syndication)
+SolidJS | Rust + Tauri 2.1 | Redb | Atom Syndication | Tokio async runtime | Azure MFA/RBAC
 
-**Stack**: Rust + Tauri 2.1 | SQLite (SQLx) | Atom Syndication | Tokio async runtime
+## Bidirectional QR Code Exchange Protocol
 
-## Commands
+**Clinician:**
 
-```bash
-# Development
-cargo check                 # Check compilation
-cargo run                   # Run the app in dev mode
-cargo tauri dev            # Run with Tauri CLI (recommended)
-cargo test                 # Run tests
+1. Select questionnaire
+2. Generate animated QR code (Azure session ID, clinician public key, admin telemetry public key, timestamp, encryption metadata (version, encryption method), questionnaire definition)
 
-# Testing NCTS connectivity
-./test_ncts.sh             # Test if NCTS endpoints are accessible
+**Patient:**
 
-# Production build
-cargo tauri build          # Build production app bundle
+3. Scan QR code
+4. Complete questionnaire (responses encrypted with AES-256-GCM, session key encrypted with clinician's public key)
+5. Generate animated QR code (Azure session ID, encrypted session key, encrypted responses, encrypted telemetry log)
 
-# Debugging with logs
-RUST_LOG=debug cargo run   # Enable debug logging
-```
+**Clinician:**
+
+6. Scan QR code
+7. Decrypt session key with private key, decrypt responses with session key
+8. Generate clinical note
+
+**Administrator (separate process):**
+
+9. Decrypt telemetry log with admin private key (clinician cannot access telemetry)
+10. Review diagnostic events (QR scan success/fail, encryption errors, validation failures)
+
+## Security & Compliance
+
+**"HIPAA compliant Encryption, Zero Network Exposure"**
+
+- ✅ 100% offline patient device (zero network exposure)
+- ✅ Air-gapped QR code transmission
+- ✅ Optional de-identified (No-PHI) mode
+- ✅ RSA-OAEP-4096 key exchange (dual keypair: clinician + admin)
+- ✅ AES-256-GCM payload encryption
+- ✅ OS keychain integration
+- ✅ SHA-256 integrity verification
+- ✅ Azure MFA/RBAC authentication
+- ✅ Configurable session expiration
+- ✅ Ephemeral patient data on patient device (auto-deleted post-scan)
+- ✅ HTTPS/TLS for staff Azure connections
+- ✅ Admin-encrypted 7-year telemetry/audit logs (optional Azure sync)
+- ✅ Admin/Security Dashboard for Real-time event monitoring
+- ✅ Library of Copmliant Questionnaires
+- ✅ Input Validation/Sanitization
+
+### Events Captured
+
+- QR: `qr_scan_success/failed`, `qr_generation_complete`
+- Encryption: `response_encryption_success/failed`, `session_key_wrap_failed`, `telemetry_encryption_failed`
+- Validation: `questionnaire_validation_failed`, `valueset_validation_failed`, `session_expired`
+- Performance: `qr_scan_duration`, `encryption_duration`, `qr_generation_duration`
+- Errors: `web_crypto_api_error`, `indexeddb_error`, `bc_ur_decode_error`
+
+## Desktop Version (Tauri)
+
+- **Questionnaire Source**: Bundled in app at compile-time and synced with Azure blob storage
+- **Sensitive Information Storage**: redb key-value store + AES-256-GCM + OS keychain + SHA-256
+  - HIPAA-compliant tamper-evident audit logging
+  - Background auto-deletion of expired responses
+- **Terminology Storage**: redb key-value store (Rust native) + Tantivy indexes
+  - SNOMED, AMT, LOINC, ValueSets
+  - NCTS terminology sync
+- **Platforms**: Windows, macOS, Linux, iOS, android
+
+## Data Storage Architecture
+
+Snomed RF2 essentials to keep
+
+✅ KEEP (Essential)
+
+- Concepts - Active status filtering
+- Descriptions - The actual searchable terms (FSN + synonyms)
+
+❌ REMOVE (Not needed for search)
+
+- Relationships - The massive table you mentioned. For autocomplete/search, you don't need "is-a" hierarchies
+- Text Definitions - Rarely used
+- Language Refsets - If only supporting English
+- Association Refsets - Historical tracking
+
+Your New Architecture Should Be:
+
+// Tantivy index schema (in-memory at runtime)
+
+1. AMT Medications Patient Index (MP, TP only)
+2. AMT Medications Doctor Index (MP, TP, MPUU, TPUU)
+3. SNOMED Problem/Diagnosis Refset (filtered by 32570571000036108)
+4. SNOMED All Terms + LOINC
+
+// Minimal redb persistence (just for rebuilding indexes)
+
+- snomed_concepts (concept_id, active)
+- snomed_descriptions (concept_id, term, type_id, active) ← YES, KEEP THIS
+- amt_codes (code, preferred_term, code_type)
+- valuesets (url, title, version, concepts)
+
+Data Flow
+
+SNOMED RF2 files → Parse → Store in redb: - sct2_Concept_Snapshot → snomed_concepts table - sct2_Description_Snapshot → snomed_descriptions table ← ESSENTIAL
+
+On app startup → Load from redb → Build Tantivy indexes: - Filter active descriptions from Problem/Diagnosis refset - Index FSN + synonyms with trigram tokenizer
+
+### Supported Terminologies
+
+- **SNOMED CT-AU SNAPSHOT**:
+
+  - Format: RF2 SNAPSHOT (ZIP archive)
+  - Size: Large (~500MB+)
+  - Update frequency: Quarterly
+  - Category: `SCT_RF2_SNAPSHOT`
+
+- **AMT CSV**:
+
+  - Format: CSV only
+  - Size: Moderate (~50MB)
+  - Update frequency: Monthly
+  - Category: `AMT_CSV`
+
+- **Value Sets (FHIR R4)**:
+  - Format: FHIR R4 Bundle (JSON)
+  - Size: Small (<10MB)
+  - Update frequency: As-needed
+  - Category: `FHIR_Bundle` (filtered by title)
+
+### Not Supported
+
+- **SNOMED DELTA**: Not exposed by NCTS syndication feed
+- **LOINC**: Proprietary binary format only, not available via syndication
+
+**Index Build Process:**
+
+- Built in-memory at app startup from redb persistence layer
+- Incremental updates after terminology sync
+- Serialized to disk for fast cold-start (optional optimization)
+
+### FHIR-Compliant Search API
+
+While Tantivy handles the heavy lifting, search commands remain FHIR-compatible from front end point of view. e.g. SolidJS will know 'if online_terminology_server = true do this vs = false do highly optimised tantivy search'.
+
+Frontend SolidJS can wrap results in FHIR ValueSet $expand format if needed.
+
+**Bundle Size Analysis:**
+
+- `qr-scanner`: ~16KB gzipped
+
+## Code Sharing Encouraged between web and app version
+
+### Role-Based Access Control (RBAC)
+
+**Azure AD App Roles:**
+
+Roles defined in Azure AD App Registration manifest:
+
+**Permission Matrix:**
+
+| Action                              | Clinician     | Administrator | Auditor  | DPO      |
+| ----------------------------------- | ------------- | ------------- | -------- | -------- |
+| **View assigned patient responses** | ✅            | ✅            | ❌       | ✅       |
+| **Export patient responses**        | ✅ (own only) | ✅ (all)      | ❌       | ✅       |
+| **Delete patient responses**        | ❌            | ❌            | ❌       | ✅       |
+| **Create questionnaire sessions**   | ✅            | ✅            | ❌       | ❌       |
+| **Manage questionnaire templates**  | ❌            | ✅            | ❌       | ❌       |
+| **View audit logs**                 | ❌ (own only) | ✅ (all)      | ✅ (all) | ✅ (all) |
+| **Export audit logs**               | ❌            | ❌            | ✅       | ✅       |
+| **Manage user roles**               | ❌            | ✅            | ❌       | ❌       |
+| **Configure retention policies**    | ❌            | ✅            | ❌       | ✅       |
+| **View breach reports**             | ❌            | ❌            | ❌       | ✅       |
+| **Initiate emergency data wipe**    | ❌            | ❌            | ❌       | ✅       |
+
+**Azure AD Conditional Access Policies (Recommended):**
+
+- **Require MFA** for all OPDQ app access
+- **Require compliant device** (Intune-managed or domain-joined)
+- **Block legacy authentication** (only modern OAuth2)
+- **Restrict by IP range** (clinic network only, optional)
+- **Require password change** every 90 days for Administrators/DPO
+
+**Audit Integration:**
+
+All Azure AD authentication events automatically logged:
+
+- Sign-ins (successful/failed)
+- MFA challenges
+- Token refresh events
+- Conditional Access policy evaluations
+- Anomalous activity detection
+
+**Real-time monitoring of security events:**
+
+- Failed decryption attempts (potential brute-force attacks)
+- Repeated authentication failures (credential stuffing)
+- Unusual access patterns (time-of-day anomalies, geographic anomalies via Azure AD)
+- Export volume spikes (potential data exfiltration)
+- Audit log integrity violations (tamper detection)
+- **Implementation**: Alert administrator on threshold breach (e.g., 5 failed decryptions in 10 minutes)
+
+### Australian Privacy Principles (APP 11.3 - 2024)
+
+[Data Breach Response Plan](https://www.oaic.gov.au/privacy/privacy-guidance-for-organisations-and-government-agencies/preventing-preparing-for-and-responding-to-data-breaches/data-breach-preparation-and-response/part-2-preparing-a-data-breach-response-plan)
+
+**Breach Notification:**
+
+- ✅ Must notify OAIC within 30 days of eligible data breach
+- **Recommendation**: Add automated breach detection alerts:
+  - Audit log tampering detected (SHA-256 chain verification fails)
+  - Encryption key compromise detected (unusual key access patterns)
+  - Unauthorized export attempts (export by non-authorized role)
+  - Data exfiltration detected (large volume exports outside business hours)
+- **Implementation**: Email/SMS alert to Data Protection Officer + automatic incident report generation
+
+**Data Sovereignty:**
+
+- ⚠️ Health data must remain in Australia (for Australian patients)
+- **Recommendation**: Add region enforcement:
+  - Check device location before storing patient responses (optional, privacy consideration)
+  - Use Azure Australia regions for cloud backups (if implemented)
+  - Warn administrators if device detected outside Australia (Conditional Access policy)
+- **Implementation**: Azure Conditional Access → Block access from outside Australia
+
+**Explicit Consent:**
+
+- ✅ Must obtain explicit consent before collecting health data
+- **Recommendation**: Add consent screen in patient app:
+  - Clear explanation of data collection ("Your responses will be encrypted and shared only with Dr. [Name]")
+  - Checkbox for explicit consent ("I consent to collection of my health information")
+  - Option to withdraw consent (refuse to scan QR, responses never transmitted)
+- **Implementation**: SolidJS consent component before questionnaire display
+
+### OWASP Mobile Top 10 (2024)
+
+**M1: Improper Credential Usage:**
+
+- ✅ Private keys stored in OS keychain (secure)
+- ⚠️ **Enhancement**: Use Hardware Security Module (HSM) when available:
+  - **iOS**: Secure Enclave for cryptographic operations
+  - **Android**: StrongBox Keymaster (hardware-backed)
+  - **macOS**: T2/M-series Secure Enclave
+  - **Windows**: TPM 2.0 for key storage
+- **Benefit**: Keys never leave hardware, resistant to extraction even with root access
+
+**M2: Inadequate Supply Chain Security:**
+
+- **Recommendation**: Add to CI/CD pipeline:
+  - `cargo-audit` - Detect vulnerable Rust dependencies
+  - `cargo-deny` - Enforce license and security policies
+  - `npm audit` - Check JavaScript dependencies
+  - Pin exact versions (avoid `^` or `~` wildcards)
+  - Verify checksum of downloaded binaries (Tantivy, redb)
+- **Implementation**: GitHub Actions workflow on every commit
+
+**M5: Insecure Communication:**
+
+- ✅ Already addressed (complete air-gap via QR, no network transmission)
+- **Enhancement**: Add QR code visual verification:
+  - Show first 6 + last 6 characters of session ID on both devices
+  - Patient confirms match before submitting responses ("Does your code match: ABC123...XYZ789?")
+  - Prevents QR substitution attacks (attacker replaces doctor's QR with their own)
+
+**M6: Inadequate Privacy Controls:**
+
+- **Recommendation**: Add privacy notice in patient app:
+  - **Who can access**: "Only Dr. [Name] can decrypt your responses"
+  - **Retention period**: "Responses auto-deleted after 30 days or when viewed + exported"
+  - **Right to deletion**: "You can refuse to scan the QR code; no data is stored until you submit"
+  - **Encryption details**: "Your responses are encrypted with military-grade RSA-4096 + AES-256"
+- **Implementation**: Modal dialog before questionnaire, dismissable after reading
+
+**M8: Security Misconfiguration:**
+
+- **Recommendation**: Harden Tauri configuration:
+  - ✅ Disable developer tools in production builds (`tauri.conf.json`: `devPath` only in dev)
+  - ✅ Disable navigation to external URLs (`allowlist.window.open: false`)
+  - ✅ Enable Content Security Policy (CSP) strict mode (no inline scripts)
+  - ✅ Disable clipboard access from WebView for PHI screens
+  - ⚠️ Add: Disable screenshots on PHI screens (platform-specific APIs)
+
+**M9: Insecure Data Storage:**
+
+- ✅ Already addressed
+- **Enhancement**: Defense-in-depth measures:
+  - **Clipboard protection**: Clear clipboard after 30 seconds if PHI copied
+  - **Screenshot prevention**: Use Tauri API to disable screenshots on sensitive screens (iOS/Android)
+  - **Task switcher obfuscation**: Blur PHI when app goes to background
+  - **Memory protection**: Use `zeroize` crate to clear decrypted PHI from memory (Rust side)
+
+**M10: Insufficient Cryptography:**
+
+- ✅ Already using industry-standard algorithms (RSA-OAEP-4096, AES-256-GCM, SHA-256)
+- **Enhancement**: Add cryptographic agility:
+  - Version all encrypted blobs (allow future algorithm migration)
+  - Support algorithm upgrades without breaking changes
+  - Monitor NIST/OWASP for deprecated algorithms (SHA-1, MD5, RSA-2048)
+  - Alert on weak algorithm detection
 
 ## Architecture
 
@@ -68,12 +335,14 @@ RUST_LOG=debug cargo run   # Enable debug logging
 **[src/commands.rs](src/commands.rs)** - Tauri Commands (Frontend API)
 
 **Sync Commands:**
+
 - `sync_terminology(terminology_type)` - Sync specific terminology (SNOMED/AMT/ValueSets)
 - `sync_all_terminologies()` - Sync all three supported types (SNOMED SNAPSHOT, AMT CSV, Value Sets)
 - `fetch_latest_version(terminology_type)` - Get latest version from NCTS
 - `get_local_latest(terminology_type)` - Get latest local version from database
 
 **Import & Query Commands:**
+
 - `import_terminology(terminology_type)` - Parse and import downloaded files into database
 - `search_terminology(query, types, limit)` - Full-text search across terminologies
 - `lookup_code(code, system)` - Get code details with synonyms
@@ -82,6 +351,7 @@ RUST_LOG=debug cargo run   # Enable debug logging
 - `list_valuesets()` - List all available ValueSets
 
 **State:**
+
 - `AppState` - Shared state with NctsClient and TerminologyStorage
 
 **[src/parsers/](src/parsers/)** - Terminology File Parsers
@@ -140,131 +410,6 @@ com.ncts.syndication/
     ├── amt_[version].csv           # AMT CSV format
     └── valuesets_[version].json    # FHIR R4 Value Set Bundles
 ```
-
-### Database Schema
-
-**Version Tracking:**
-```sql
-CREATE TABLE terminology_versions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    terminology_type TEXT NOT NULL,
-    version TEXT NOT NULL,
-    effective_date TEXT,
-    download_url TEXT NOT NULL,
-    file_path TEXT,
-    downloaded_at TEXT,
-    is_latest BOOLEAN NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    content_item_identifier TEXT,
-    content_item_version TEXT,
-    sha256_hash TEXT,
-    sct_base_version TEXT,
-    imported BOOLEAN NOT NULL DEFAULT 0,  -- NEW: Import tracking
-    imported_at TEXT,                     -- NEW: Import timestamp
-    UNIQUE(terminology_type, version)
-);
-```
-
-**SNOMED CT-AU Content Tables:**
-```sql
--- Concepts (core terminology entities)
-CREATE TABLE snomed_concepts (
-    id TEXT PRIMARY KEY,
-    effective_time TEXT NOT NULL,
-    active INTEGER NOT NULL,
-    module_id TEXT NOT NULL,
-    definition_status_id TEXT NOT NULL,
-    version_id INTEGER NOT NULL,
-    FOREIGN KEY (version_id) REFERENCES terminology_versions(id) ON DELETE CASCADE
-);
-
--- Descriptions (terms and synonyms)
-CREATE TABLE snomed_descriptions (
-    id TEXT PRIMARY KEY,
-    effective_time TEXT NOT NULL,
-    active INTEGER NOT NULL,
-    module_id TEXT NOT NULL,
-    concept_id TEXT NOT NULL,
-    language_code TEXT NOT NULL,
-    type_id TEXT NOT NULL,
-    term TEXT NOT NULL,              -- Full-text searchable
-    case_significance_id TEXT NOT NULL,
-    version_id INTEGER NOT NULL,
-    FOREIGN KEY (concept_id) REFERENCES snomed_concepts(id) ON DELETE CASCADE,
-    FOREIGN KEY (version_id) REFERENCES terminology_versions(id) ON DELETE CASCADE
-);
-
--- Relationships (concept associations)
-CREATE TABLE snomed_relationships (
-    id TEXT PRIMARY KEY,
-    effective_time TEXT NOT NULL,
-    active INTEGER NOT NULL,
-    module_id TEXT NOT NULL,
-    source_id TEXT NOT NULL,
-    destination_id TEXT NOT NULL,
-    relationship_group INTEGER NOT NULL,
-    type_id TEXT NOT NULL,
-    characteristic_type_id TEXT NOT NULL,
-    modifier_id TEXT NOT NULL,
-    version_id INTEGER NOT NULL,
-    FOREIGN KEY (source_id) REFERENCES snomed_concepts(id) ON DELETE CASCADE,
-    FOREIGN KEY (destination_id) REFERENCES snomed_concepts(id) ON DELETE CASCADE,
-    FOREIGN KEY (version_id) REFERENCES terminology_versions(id) ON DELETE CASCADE
-);
-```
-
-**AMT Content Tables:**
-```sql
-CREATE TABLE amt_codes (
-    id TEXT PRIMARY KEY,
-    preferred_term TEXT NOT NULL,     -- Full-text searchable
-    code_type TEXT NOT NULL,
-    parent_code TEXT,
-    properties TEXT,                   -- JSON storage for additional properties
-    version_id INTEGER NOT NULL,
-    FOREIGN KEY (version_id) REFERENCES terminology_versions(id) ON DELETE CASCADE
-);
-```
-
-**FHIR ValueSet Tables:**
-```sql
--- ValueSet metadata
-CREATE TABLE valuesets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    url TEXT NOT NULL UNIQUE,
-    version TEXT,
-    name TEXT,
-    title TEXT,
-    status TEXT,
-    description TEXT,
-    publisher TEXT,
-    version_id INTEGER NOT NULL,
-    FOREIGN KEY (version_id) REFERENCES terminology_versions(id) ON DELETE CASCADE
-);
-
--- ValueSet expansion (concept codes)
-CREATE TABLE valueset_concepts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    valueset_id INTEGER NOT NULL,
-    system TEXT NOT NULL,
-    code TEXT NOT NULL,
-    display TEXT,
-    FOREIGN KEY (valueset_id) REFERENCES valuesets(id) ON DELETE CASCADE,
-    UNIQUE(valueset_id, system, code)
-);
-```
-
-**Indexes for Performance:**
-- Concepts: `active`, `version_id`
-- Descriptions: `concept_id`, `active`, `type_id`, `term` (full-text search)
-- Relationships: `source_id`, `destination_id`, `type_id`, `active`
-- AMT: `version_id`, `code_type`, `preferred_term`, `parent_code`
-- ValueSets: `url`, `version_id`
-- ValueSet Concepts: `valueset_id`, `code`, `system`, composite `(valueset_id, system, code)`
-
-**Database Initialization**: Uses `std::fs::create_dir_all` for directory creation (not `tokio::fs`) to avoid async runtime issues. SQLite connection string format: `sqlite:///{absolute_path}?mode=rwc` (three slashes + create mode).
-
-## Sync & Import Workflow
 
 ### Sync Phase (Download Files)
 
@@ -340,15 +485,6 @@ String → Enum parsing in `commands.rs`:
 - **Category Filtering**: ✅ Implemented - targets SNAPSHOT, AMT CSV, and R4 Value Sets
 - **Checksums**: ✅ SHA-256 validation implemented for downloads
 
-**Supported Formats:**
-- ✅ SNOMED CT-AU SNAPSHOT (RF2 SNAPSHOT format)
-- ✅ AMT CSV format
-- ✅ FHIR R4 Value Set Bundles
-
-**Not Available:**
-- ❌ SNOMED DELTA format (not exposed by NCTS syndication)
-- ❌ LOINC (proprietary binary only, not in syndication feed)
-
 ### Authentication
 
 OAuth2 authentication is implemented using the Client Credentials grant flow:
@@ -361,6 +497,7 @@ OAuth2 authentication is implemented using the Client Credentials grant flow:
    ```
 
 2. **Token Flow**:
+
    - `TokenManager` requests access token from `https://api.healthterminologies.gov.au/oauth2/token`
    - Token cached with expiry tracking
    - Automatically refreshes 60 seconds before expiry
@@ -379,10 +516,12 @@ The NCTS provides a **single unified syndication feed** containing all terminolo
 **App Filtering Strategy** - Uses `<category term="...">` elements + title-based filtering:
 
 1. **SNOMED CT-AU SNAPSHOT**: Category `SCT_RF2_SNAPSHOT`
+
    - Gets RF2 SNAPSHOT format only
    - DELTA format not exposed by NCTS syndication
 
 2. **AMT CSV**: Category `AMT_CSV`
+
    - Gets CSV format only
 
 3. **Value Sets (R4)**: Category `FHIR_Bundle` + title filtering
@@ -393,6 +532,7 @@ The NCTS provides a **single unified syndication feed** containing all terminolo
 ### Testing Connectivity
 
 Run `./test_ncts.sh` to verify NCTS endpoint is accessible. The script:
+
 - Automatically loads credentials from `.env`
 - Obtains OAuth2 access token
 - Tests the v1 syndication endpoint with authentication
@@ -479,347 +619,7 @@ interface ValidationResult {
 }
 ```
 
-## Implementation Status
-
-**✅ Implemented**:
-
-- ✅ ZIP extraction and indexing (SNOMED RF2 archives)
-- ✅ FHIR ValueSet `$expand` operation using local data
-- ✅ Full-text search across SNOMED and AMT
-- ✅ Code lookup with synonyms (SNOMED FSN + all descriptions)
-- ✅ ValueSet expansion from database
-- ✅ Code validation against ValueSets
-- ✅ Batch import with performance optimization (1000 records/batch)
-- ✅ SHA-256 checksum validation for downloads
-- ✅ Import tracking (imported/imported_at fields)
-
-**📋 Future Enhancements**:
-
-- Download progress tracking (streaming progress updates)
-- Automatic scheduled syncs (background daemon mode)
-- Retry logic for failed downloads with exponential backoff
-- SNOMED hierarchy navigation (IS-A relationships)
-- Relationship traversal queries (find all descendants/ancestors)
-- Full-text search ranking improvements (TF-IDF or FTS5)
-- Incremental updates support (if NCTS exposes DELTA format)
-- Export functionality (export terminology subsets)
-- API server mode (HTTP REST API in addition to Tauri IPC)
-
-**Integration Use Cases**:
-
-This app now serves as a **complete desktop terminology backend** for FHIR applications needing:
-- Offline ValueSet expansion for questionnaires
-- Code validation for form answers
-- Full-text terminology search for code selection
-- Synonym lookup for display enhancement
-- Local terminology browsing without API calls
-
-## Future Project Goals: Offline Patient-Doctor Questionnaires (OPDQ)
-
-**Vision**: Extend this app to support privacy-preserving, air-gapped clinical questionnaires using QR code exchange.
-
-### OPDQ System Overview
-
-The planned OPDQ feature will enable secure questionnaire workflows between doctors and patients without network transmission:
-
-**Two-Way QR Exchange:**
-1. **Doctor → Patient**: QR code contains questionnaire definition + doctor's public encryption key
-2. **Patient → Doctor**: Animated BC-UR QR sequence with encrypted responses
-
-**Key Design Principles:**
-- **Zero Network Transfer**: Complete air-gap architecture using visual QR codes only
-- **End-to-End Encryption**: RSA/AES hybrid encryption (responses encrypted with doctor's public key)
-- **BC-UR Animated QR**: All responses use fountain-coded multi-frame QR (handles 1KB-100KB+ payloads)
-- **HIPAA Compliance**: No pre-shared secrets, patient controls sharing, ephemeral session keys
-- **Platform Support**: Desktop-only (Tauri + SolidJS + SQLCipher) - no web version for security
-
-### Architecture Plans
-
-**Frontend (SolidJS in Tauri WebView):**
-- `BCURScanner.tsx` - Multi-frame QR scanner using qr-scanner library
-- `BCURGenerator.tsx` - Rotating animated QR display (10-15 FPS)
-- `QuestionnaireForm.tsx` - Patient questionnaire UI with validation
-- `ResponseViewer.tsx` - Clinician response viewer
-- Web Crypto API for all cryptographic operations (RSA-OAEP-4096, AES-256-GCM)
-
-**Backend (Rust/Tauri):**
-- SQLCipher for encrypted storage of patient responses
-- Questionnaire templates bundled at compile-time
-- Integration with existing NCTS terminology for ValueSet-driven questions
-- Automatic data deletion after viewing/exporting responses
-- OS keychain integration for private key storage
-
-### Planned Database Extensions
-
-**Doctor's Device (Desktop):**
-```sql
-CREATE TABLE questionnaire_sessions (
-    id TEXT PRIMARY KEY,
-    questionnaire_id TEXT NOT NULL,
-    public_key TEXT NOT NULL,
-    private_key_ref TEXT NOT NULL,  -- OS keychain reference
-    created_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL,
-    status TEXT DEFAULT 'pending'   -- pending, completed, expired
-);
-
-CREATE TABLE patient_responses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    questionnaire_id TEXT NOT NULL,
-    received_at TEXT NOT NULL,
-    encrypted_responses BLOB NOT NULL,  -- Double-encrypted
-    encryption_nonce BLOB NOT NULL,
-    clinician_id TEXT NOT NULL,
-    viewed BOOLEAN DEFAULT 0,
-    exported BOOLEAN DEFAULT 0,
-    FOREIGN KEY (session_id) REFERENCES questionnaire_sessions(id)
-);
-
-CREATE TABLE questionnaires (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    version TEXT NOT NULL,
-    definition TEXT NOT NULL,  -- JSON questionnaire schema
-    created_at TEXT NOT NULL,
-    active BOOLEAN DEFAULT 1
-);
-```
-
-**Patient's Device (Desktop):**
-- Same Tauri app as doctor's device
-- Uses IndexedDB for temporary session storage (cleared after QR generation)
-- No persistent patient data storage
-
-### Performance Characteristics
-
-**BC-UR Animated QR (qr-scanner library):**
-- Small questionnaires (~1KB): 1 frame, ~100ms scan time
-- Medium questionnaires (~3KB): 2 frames, ~200ms scan time
-- Large questionnaires (~10KB): 6 frames, ~600ms scan time
-- Frame rate: 10-15 FPS for reliable scanning
-- Throughput: ~25 kbps
-- Fountain coding: Stateless, missing-frame tolerant
-
-**Why BC-UR Only (No Single QR Mode):**
-- Eliminates format selection logic
-- Single code path for all payload sizes
-- Minimal overhead for small payloads (~50ms extra vs static QR)
-- Handles complex questionnaires without modification
-
-### Technology Stack (Additional)
-
-**JavaScript/TypeScript Dependencies:**
-```json
-{
-  "dependencies": {
-    "solid-js": "^1.8.0",
-    "qr-scanner": "^1.4.2",
-    "qrcode": "^1.5.3",
-    "@ngraveio/bc-ur": "^1.1.12",
-    "uuid": "^10.0.0"
-  }
-}
-```
-
-**Rust Dependencies (Desktop Only):**
-```toml
-rusqlite = { version = "0.32", features = ["bundled-sqlcipher"] }
-keyring = "3.8"  # OS keychain integration
-```
-
-### Integration with Current System
-
-The OPDQ feature will leverage existing terminology infrastructure:
-
-1. **ValueSet-Driven Questions**: Use `expand_valueset()` and `validate_code()` commands for questionnaire answer options
-2. **Code Search**: `search_terminology()` for autocomplete in questionnaire builders
-3. **Offline Validation**: All terminology lookups happen locally using imported SNOMED/AMT data
-4. **Shared Storage**: Separate SQLite database for OPDQ data, same directory structure
-
-**Example Integration:**
-```javascript
-// Questionnaire uses ValueSet for answer options
-const diabetesScreening = {
-  questions: [{
-    id: "diagnosis",
-    text: "Primary diagnosis?",
-    type: "valueset",
-    valuesetUrl: "http://healthterminologies.gov.au/fhir/ValueSet/diabetes-conditions",
-  }]
-};
-
-// Expand ValueSet to get answer options (offline)
-const options = await invoke("expand_valueset", {
-  valuesetUrl: diabetesScreening.questions[0].valuesetUrl
-});
-
-// Generate QR with questionnaire + options
-const qrPayload = {
-  questionnaire: diabetesScreening,
-  answerOptions: options.concepts,
-  doctorPublicKey: sessionKey
-};
-```
-
-### Security & Privacy (OPDQ-Specific)
-
-- **Encryption**: RSA-OAEP-4096 for key exchange, AES-256-GCM for payload
-- **Key Storage**: OS keychain for private keys (macOS Keychain, Windows Credential Manager, Linux Secret Service)
-- **Data at Rest**: SQLCipher encryption for all patient responses on disk
-- **Ephemeral Sessions**: 1-hour session expiry, automatic cleanup
-- **Audit Trail**: All access logged (received, viewed, exported, deleted)
-- **No PHI Transmission**: Zero network activity during questionnaire exchange
-- **Patient Consent**: Visual confirmation before scanning doctor's QR
-
-### Implementation Roadmap
-
-**Phase 1**: Core OPDQ Infrastructure (Desktop)
-- [ ] BC-UR QR scanner/generator components (SolidJS)
-- [ ] Web Crypto API wrapper for hybrid encryption
-- [ ] SQLCipher integration for desktop app
-- [ ] Questionnaire session management
-- [ ] Basic questionnaire templates
-
-**Phase 2**: Integration with Terminology
-- [ ] ValueSet-driven question types
-- [ ] Code validation in questionnaire responses
-- [ ] Autocomplete using local terminology search
-- [ ] Questionnaire builder UI
-
-**Phase 3**: Advanced Features
-- [ ] Complex question logic (conditional display)
-- [ ] Multi-page questionnaires
-- [ ] Response export formats (FHIR Questionnaire Response)
-- [ ] Questionnaire version management
-
-### Development Considerations
-
-**Code Architecture:**
-- SolidJS frontend in Tauri WebView
-- Web Crypto API for all encryption
-- Rust backend for SQLCipher database operations
-- NCTS terminology sync remains separate module
-
-**Testing Strategy:**
-- Test questionnaire flow with smallest payload first (~1KB, 1 frame)
-- Progress to medium (~3KB, 2 frames) and large (~10KB, 6 frames)
-- Verify encryption/decryption round-trip
-- Test session expiry and cleanup
-- Validate BC-UR frame reconstruction with missing frames
-
-**Dependencies on Current System:**
-- Existing NCTS terminology data provides foundation for questionnaires
-- ValueSet expansion enables standardized answer options
-- Code validation ensures questionnaire responses use valid codes
-- Storage patterns (SQLite, directory structure) remain consistent
-
-See **[OPDQs.md](OPDQs.md)** for complete OPDQ technical specification.
-
-## Terminology-Specific Notes
-
-### Supported Terminologies
-
-- **SNOMED CT-AU SNAPSHOT**:
-  - Format: RF2 SNAPSHOT (ZIP archive)
-  - Size: Large (~500MB+)
-  - Update frequency: Quarterly
-  - Category: `SCT_RF2_SNAPSHOT`
-
-- **AMT CSV**:
-  - Format: CSV only
-  - Size: Moderate (~50MB)
-  - Update frequency: Monthly
-  - Category: `AMT_CSV`
-
-- **Value Sets (FHIR R4)**:
-  - Format: FHIR R4 Bundle (JSON)
-  - Size: Small (<10MB)
-  - Update frequency: As-needed
-  - Category: `FHIR_Bundle` (filtered by title)
-
-### Not Supported
-
-- **SNOMED DELTA**: Not exposed by NCTS syndication feed
-- **LOINC**: Proprietary binary format only, not available via syndication
-
-## Development Tips
-
-### Build & Testing
-
-- Use `cargo check` frequently for fast compilation feedback
-- Run `cargo test` to execute parser unit tests
-- Use `RUST_LOG=debug cargo run` for detailed logging during import
-- Database operations are async - always `.await` storage calls
-- DateTime handling is critical - use RFC3339 format for SQLite storage
-
-### Import Testing Strategy
-
-**Recommended order** (smallest to largest):
-1. **Test with Value Sets first** - smallest (~10MB, few hundred ValueSets)
-   - Import time: <1 minute
-   - Good for verifying basic import flow
-2. **AMT CSV** - moderate size (~50MB, thousands of codes)
-   - Import time: 1-2 minutes
-   - Tests CSV parsing and single-table import
-3. **SNOMED SNAPSHOT** - large (~500MB+, 400k+ concepts)
-   - Import time: 5-10 minutes
-   - Tests ZIP extraction, multi-file parsing, batch inserts
-   - Monitor console for progress (Importing concepts/descriptions/relationships...)
-
-### Performance Characteristics
-
-**Import Performance:**
-- Batch size: 1000 records per insert
-- SNOMED import: ~400k concepts + ~1M descriptions + ~1M relationships
-- Expected database size after full import: ~500MB+
-- Memory usage: Moderate (streaming parsers, batch processing)
-
-**Query Performance:**
-- Search queries: Milliseconds (with proper indexes)
-- Code lookup: <10ms for single concept
-- ValueSet expansion: <100ms for typical ValueSet (~100 codes)
-- Full-text search: <500ms for common terms
-
-**Optimization Tips:**
-- Ensure `imported` flag is checked before re-importing
-- Use `limit` parameter in search queries
-- Database indexes are created automatically during migration
-- Consider SQLite WAL mode for concurrent read performance (future enhancement)
-
-### Debugging Import Issues
-
-```rust
-// Enable debug logging
-RUST_LOG=debug cargo run
-
-// Common issues:
-// 1. "File not found" - Check ZIP extraction succeeded
-// 2. "FK constraint failed" - Ensure concepts imported before descriptions
-// 3. "Import already in progress" - Check imported flag in database
-// 4. Memory issues - Reduce batch size in import.rs (currently 1000)
-```
-
-### NCTS-Specific Notes
-
-- Check actual NCTS documentation for correct syndication endpoints
-- Monitor console output for feed parsing details and category filtering
-- SHA-256 validation automatically checks file integrity
-- OAuth token automatically refreshed 60 seconds before expiry
-
-## Security & Compliance
-
-- **No PHI**: App handles terminology definitions only, not patient data
-- **HTTPS Only**: All NCTS connections use HTTPS
-- **Licensing**: Terminology files subject to SNOMED, AMT, and NCTS FHIR licenses - do not redistribute
-- **Supported Content**: SNOMED SNAPSHOT, AMT CSV, FHIR R4 Value Sets only
-- **CSP**: Content Security Policy configured in [tauri.conf.json](tauri.conf.json)
-- **Sandboxing**: Tauri provides OS-level process isolation
-
 ## Documentation
 
-- **[README.md](README.md)** - Comprehensive technical documentation
-- **[QUICKSTART.md](QUICKSTART.md)** - Quick setup guide
-- **[PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)** - Project status overview
+- **[NCTS.md](NCTS.md)** - NCTS-specific details
 - **[NCTS_INTEGRATION.md](NCTS_INTEGRATION.md)** - NCTS-specific integration details
-- **[GETTING_STARTED.md](GETTING_STARTED.md)** - Detailed getting started guide

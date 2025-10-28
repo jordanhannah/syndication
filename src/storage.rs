@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
+use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::SqlitePool;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -10,10 +10,36 @@ pub enum StorageError {
     Database(String),
     #[error("IO error: {0}")]
     Io(String),
+    #[error("Serialization error: {0}")]
+    Serialization(String),
 }
 
-impl From<sqlx::Error> for StorageError {
-    fn from(err: sqlx::Error) -> Self {
+impl From<redb::DatabaseError> for StorageError {
+    fn from(err: redb::DatabaseError) -> Self {
+        StorageError::Database(err.to_string())
+    }
+}
+
+impl From<redb::TransactionError> for StorageError {
+    fn from(err: redb::TransactionError) -> Self {
+        StorageError::Database(err.to_string())
+    }
+}
+
+impl From<redb::TableError> for StorageError {
+    fn from(err: redb::TableError) -> Self {
+        StorageError::Database(err.to_string())
+    }
+}
+
+impl From<redb::StorageError> for StorageError {
+    fn from(err: redb::StorageError) -> Self {
+        StorageError::Database(err.to_string())
+    }
+}
+
+impl From<redb::CommitError> for StorageError {
+    fn from(err: redb::CommitError) -> Self {
         StorageError::Database(err.to_string())
     }
 }
@@ -24,9 +50,24 @@ impl From<std::io::Error> for StorageError {
     }
 }
 
+impl From<bincode::Error> for StorageError {
+    fn from(err: bincode::Error) -> Self {
+        StorageError::Serialization(err.to_string())
+    }
+}
+
+// Table definitions
+const TERMINOLOGY_VERSIONS: TableDefinition<u64, &[u8]> = TableDefinition::new("terminology_versions");
+const TERMINOLOGY_VERSION_COUNTER: TableDefinition<&str, u64> = TableDefinition::new("version_counter");
+const SNOMED_CONCEPTS: TableDefinition<&str, &[u8]> = TableDefinition::new("snomed_concepts");
+const SNOMED_DESCRIPTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("snomed_descriptions");
+const AMT_CODES: TableDefinition<&str, &[u8]> = TableDefinition::new("amt_codes");
+const VALUESETS: TableDefinition<&str, &[u8]> = TableDefinition::new("valuesets");
+const VALUESET_CONCEPTS: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("valueset_concepts");
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminologyVersion {
-    pub id: i64,
+    pub id: u64,
     pub terminology_type: String,
     pub version: String,
     pub effective_date: Option<String>,
@@ -45,46 +86,69 @@ pub struct TerminologyVersion {
     pub imported_at: Option<DateTime<Utc>>,
 }
 
-// Custom implementation to parse from SQLite string fields
-impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for TerminologyVersion {
-    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        use sqlx::Row;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnomedConcept {
+    pub id: String,
+    pub effective_time: String,
+    pub active: bool,
+    pub module_id: String,
+    pub definition_status_id: String,
+    pub version_id: u64,
+}
 
-        let downloaded_at: Option<String> = row.try_get("downloaded_at")?;
-        let created_at: String = row.try_get("created_at")?;
-        let imported_at: Option<String> = row.try_get("imported_at").ok().flatten();
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnomedDescription {
+    pub id: String,
+    pub effective_time: String,
+    pub active: bool,
+    pub module_id: String,
+    pub concept_id: String,
+    pub language_code: String,
+    pub type_id: String,
+    pub term: String,
+    pub case_significance_id: String,
+    pub version_id: u64,
+}
 
-        Ok(Self {
-            id: row.try_get("id")?,
-            terminology_type: row.try_get("terminology_type")?,
-            version: row.try_get("version")?,
-            effective_date: row.try_get("effective_date")?,
-            download_url: row.try_get("download_url")?,
-            file_path: row.try_get("file_path")?,
-            downloaded_at: downloaded_at.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
-            is_latest: row.try_get("is_latest")?,
-            created_at: DateTime::parse_from_rfc3339(&created_at)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
-            content_item_identifier: row.try_get("content_item_identifier").ok(),
-            content_item_version: row.try_get("content_item_version").ok(),
-            sha256_hash: row.try_get("sha256_hash").ok(),
-            sct_base_version: row.try_get("sct_base_version").ok(),
-            imported: row.try_get("imported").unwrap_or(false),
-            imported_at: imported_at.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
-        })
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AmtCode {
+    pub id: String,
+    pub preferred_term: String,
+    pub code_type: String,
+    pub parent_code: Option<String>,
+    pub properties: Option<String>,
+    pub version_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValueSet {
+    pub url: String,
+    pub version: Option<String>,
+    pub name: Option<String>,
+    pub title: Option<String>,
+    pub status: Option<String>,
+    pub description: Option<String>,
+    pub publisher: Option<String>,
+    pub version_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValueSetConcept {
+    pub valueset_url: String,
+    pub system: String,
+    pub code: String,
+    pub display: Option<String>,
 }
 
 pub struct TerminologyStorage {
-    pool: SqlitePool,
+    db: Database,
     data_dir: PathBuf,
     db_path: PathBuf,
 }
 
 impl TerminologyStorage {
     /// Create a new storage instance with the given database path
-    pub async fn new(db_path: PathBuf, data_dir: PathBuf) -> Result<Self, StorageError> {
+    pub fn new(db_path: PathBuf, data_dir: PathBuf) -> Result<Self, StorageError> {
         // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -93,366 +157,48 @@ impl TerminologyStorage {
         // Ensure data directory exists
         std::fs::create_dir_all(&data_dir)?;
 
-        // SQLite connection string - need three slashes for absolute paths
-        // Add ?mode=rwc to allow read, write, and create permissions
-        let db_url = format!("sqlite:///{}?mode=rwc", db_path.display());
-        let pool = SqlitePool::connect(&db_url).await?;
+        // Open or create redb database
+        let db = Database::create(&db_path)?;
 
         let storage = Self {
-            pool,
+            db,
             data_dir,
             db_path,
         };
-        storage.run_migrations().await?;
+
+        // Initialize tables (redb creates tables lazily, but we can ensure they exist)
+        storage.initialize_tables()?;
 
         Ok(storage)
     }
 
-    /// Run database migrations
-    async fn run_migrations(&self) -> Result<(), StorageError> {
-        // Terminology versions metadata table
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS terminology_versions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                terminology_type TEXT NOT NULL,
-                version TEXT NOT NULL,
-                effective_date TEXT,
-                download_url TEXT NOT NULL,
-                file_path TEXT,
-                downloaded_at TEXT,
-                is_latest BOOLEAN NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                content_item_identifier TEXT,
-                content_item_version TEXT,
-                sha256_hash TEXT,
-                sct_base_version TEXT,
-                imported BOOLEAN NOT NULL DEFAULT 0,
-                imported_at TEXT,
-                UNIQUE(terminology_type, version)
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_terminology_type
-            ON terminology_versions(terminology_type)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_is_latest
-            ON terminology_versions(is_latest)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // SNOMED CT-AU tables (RF2 SNAPSHOT format)
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS snomed_concepts (
-                id TEXT PRIMARY KEY,
-                effective_time TEXT NOT NULL,
-                active INTEGER NOT NULL,
-                module_id TEXT NOT NULL,
-                definition_status_id TEXT NOT NULL,
-                version_id INTEGER NOT NULL,
-                FOREIGN KEY (version_id) REFERENCES terminology_versions(id) ON DELETE CASCADE
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_snomed_concepts_active
-            ON snomed_concepts(active)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_snomed_concepts_version
-            ON snomed_concepts(version_id)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS snomed_descriptions (
-                id TEXT PRIMARY KEY,
-                effective_time TEXT NOT NULL,
-                active INTEGER NOT NULL,
-                module_id TEXT NOT NULL,
-                concept_id TEXT NOT NULL,
-                language_code TEXT NOT NULL,
-                type_id TEXT NOT NULL,
-                term TEXT NOT NULL,
-                case_significance_id TEXT NOT NULL,
-                version_id INTEGER NOT NULL,
-                FOREIGN KEY (concept_id) REFERENCES snomed_concepts(id) ON DELETE CASCADE,
-                FOREIGN KEY (version_id) REFERENCES terminology_versions(id) ON DELETE CASCADE
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_snomed_descriptions_concept
-            ON snomed_descriptions(concept_id)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_snomed_descriptions_active
-            ON snomed_descriptions(active)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_snomed_descriptions_type
-            ON snomed_descriptions(type_id)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_snomed_descriptions_term
-            ON snomed_descriptions(term)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS snomed_relationships (
-                id TEXT PRIMARY KEY,
-                effective_time TEXT NOT NULL,
-                active INTEGER NOT NULL,
-                module_id TEXT NOT NULL,
-                source_id TEXT NOT NULL,
-                destination_id TEXT NOT NULL,
-                relationship_group INTEGER NOT NULL,
-                type_id TEXT NOT NULL,
-                characteristic_type_id TEXT NOT NULL,
-                modifier_id TEXT NOT NULL,
-                version_id INTEGER NOT NULL,
-                FOREIGN KEY (source_id) REFERENCES snomed_concepts(id) ON DELETE CASCADE,
-                FOREIGN KEY (destination_id) REFERENCES snomed_concepts(id) ON DELETE CASCADE,
-                FOREIGN KEY (version_id) REFERENCES terminology_versions(id) ON DELETE CASCADE
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_snomed_relationships_source
-            ON snomed_relationships(source_id)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_snomed_relationships_destination
-            ON snomed_relationships(destination_id)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_snomed_relationships_type
-            ON snomed_relationships(type_id)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_snomed_relationships_active
-            ON snomed_relationships(active)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // AMT (Australian Medicines Terminology) tables - CSV format
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS amt_codes (
-                id TEXT PRIMARY KEY,
-                preferred_term TEXT NOT NULL,
-                code_type TEXT NOT NULL,
-                parent_code TEXT,
-                properties TEXT,
-                version_id INTEGER NOT NULL,
-                FOREIGN KEY (version_id) REFERENCES terminology_versions(id) ON DELETE CASCADE
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_amt_codes_version
-            ON amt_codes(version_id)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_amt_codes_type
-            ON amt_codes(code_type)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_amt_codes_term
-            ON amt_codes(preferred_term)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_amt_codes_parent
-            ON amt_codes(parent_code)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // FHIR R4 ValueSet tables - for ValueSet expansion and code validation
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS valuesets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                url TEXT NOT NULL UNIQUE,
-                version TEXT,
-                name TEXT,
-                title TEXT,
-                status TEXT,
-                description TEXT,
-                publisher TEXT,
-                version_id INTEGER NOT NULL,
-                FOREIGN KEY (version_id) REFERENCES terminology_versions(id) ON DELETE CASCADE
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_valuesets_url
-            ON valuesets(url)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_valuesets_version_id
-            ON valuesets(version_id)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS valueset_concepts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                valueset_id INTEGER NOT NULL,
-                system TEXT NOT NULL,
-                code TEXT NOT NULL,
-                display TEXT,
-                FOREIGN KEY (valueset_id) REFERENCES valuesets(id) ON DELETE CASCADE,
-                UNIQUE(valueset_id, system, code)
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_valueset_concepts_valueset
-            ON valueset_concepts(valueset_id)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_valueset_concepts_code
-            ON valueset_concepts(code)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_valueset_concepts_system
-            ON valueset_concepts(system)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_valueset_concepts_lookup
-            ON valueset_concepts(valueset_id, system, code)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
+    /// Initialize database tables
+    fn initialize_tables(&self) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let _ = write_txn.open_table(TERMINOLOGY_VERSIONS)?;
+            let _ = write_txn.open_table(TERMINOLOGY_VERSION_COUNTER)?;
+            let _ = write_txn.open_table(SNOMED_CONCEPTS)?;
+            let _ = write_txn.open_table(SNOMED_DESCRIPTIONS)?;
+            let _ = write_txn.open_table(AMT_CODES)?;
+            let _ = write_txn.open_table(VALUESETS)?;
+            let _ = write_txn.open_table(VALUESET_CONCEPTS)?;
+        }
+        write_txn.commit()?;
         Ok(())
     }
 
+    /// Get next version ID (auto-increment)
+    fn next_version_id(&self, write_txn: &redb::WriteTransaction) -> Result<u64, StorageError> {
+        let mut table = write_txn.open_table(TERMINOLOGY_VERSION_COUNTER)?;
+        let current = table.get("counter")?.map(|v| v.value()).unwrap_or(0);
+        let next = current + 1;
+        table.insert("counter", next)?;
+        Ok(next)
+    }
+
     /// Record a new terminology version with NCTS metadata
-    pub async fn record_version(
+    pub fn record_version(
         &self,
         terminology_type: &str,
         version: &str,
@@ -462,200 +208,434 @@ impl TerminologyStorage {
         content_item_version: Option<&str>,
         sha256_hash: Option<&str>,
         sct_base_version: Option<&str>,
-    ) -> Result<i64, StorageError> {
-        let result = sqlx::query(
-            r#"
-            INSERT INTO terminology_versions
-                (terminology_type, version, effective_date, download_url, created_at,
-                 content_item_identifier, content_item_version, sha256_hash, sct_base_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(terminology_type, version) DO UPDATE SET
-                download_url = excluded.download_url,
-                effective_date = excluded.effective_date,
-                content_item_identifier = excluded.content_item_identifier,
-                content_item_version = excluded.content_item_version,
-                sha256_hash = excluded.sha256_hash,
-                sct_base_version = excluded.sct_base_version
-            RETURNING id
-            "#,
-        )
-        .bind(terminology_type)
-        .bind(version)
-        .bind(effective_date)
-        .bind(download_url)
-        .bind(Utc::now().to_rfc3339())
-        .bind(content_item_identifier)
-        .bind(content_item_version)
-        .bind(sha256_hash)
-        .bind(sct_base_version)
-        .fetch_one(&self.pool)
-        .await?;
+    ) -> Result<u64, StorageError> {
+        let write_txn = self.db.begin_write()?;
 
-        use sqlx::Row;
-        Ok(result.get(0))
+        let version_id = {
+            let mut table = write_txn.open_table(TERMINOLOGY_VERSIONS)?;
+
+            // Check if version already exists (using the already-opened table)
+            let existing = Self::find_version_in_table(&table, terminology_type, version)?;
+
+            if let Some(existing_version) = existing {
+                // Update existing
+                let mut updated = existing_version;
+                updated.download_url = download_url.to_string();
+                updated.effective_date = effective_date.map(|s| s.to_string());
+                updated.content_item_identifier = content_item_identifier.map(|s| s.to_string());
+                updated.content_item_version = content_item_version.map(|s| s.to_string());
+                updated.sha256_hash = sha256_hash.map(|s| s.to_string());
+                updated.sct_base_version = sct_base_version.map(|s| s.to_string());
+
+                let bytes = bincode::serialize(&updated)?;
+                table.insert(updated.id, bytes.as_slice())?;
+                updated.id
+            } else {
+                // Create new - need to open counter table separately
+                drop(table); // Release the table lock temporarily
+                let id = self.next_version_id(&write_txn)?;
+                let mut table = write_txn.open_table(TERMINOLOGY_VERSIONS)?;
+
+                let new_version = TerminologyVersion {
+                    id,
+                    terminology_type: terminology_type.to_string(),
+                    version: version.to_string(),
+                    effective_date: effective_date.map(|s| s.to_string()),
+                    download_url: download_url.to_string(),
+                    file_path: None,
+                    downloaded_at: None,
+                    is_latest: false,
+                    created_at: Utc::now(),
+                    content_item_identifier: content_item_identifier.map(|s| s.to_string()),
+                    content_item_version: content_item_version.map(|s| s.to_string()),
+                    sha256_hash: sha256_hash.map(|s| s.to_string()),
+                    sct_base_version: sct_base_version.map(|s| s.to_string()),
+                    imported: false,
+                    imported_at: None,
+                };
+
+                let bytes = bincode::serialize(&new_version)?;
+                table.insert(id, bytes.as_slice())?;
+                id
+            }
+        };
+
+        write_txn.commit()?;
+        Ok(version_id)
+    }
+
+    /// Find version by terminology type and version string in an already-opened table
+    fn find_version_in_table(
+        table: &redb::Table<u64, &[u8]>,
+        terminology_type: &str,
+        version: &str,
+    ) -> Result<Option<TerminologyVersion>, StorageError> {
+        for item in table.iter()? {
+            let (_, value) = item?;
+            let ver: TerminologyVersion = bincode::deserialize(value.value())?;
+            if ver.terminology_type == terminology_type && ver.version == version {
+                return Ok(Some(ver));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Mark a version as downloaded and set its file path
-    pub async fn mark_downloaded(
-        &self,
-        id: i64,
-        file_path: &str,
-    ) -> Result<(), StorageError> {
-        // If file_path is empty, clear the download metadata instead
+    pub fn mark_downloaded(&self, id: u64, file_path: &str) -> Result<(), StorageError> {
         if file_path.is_empty() {
-            return self.clear_downloaded(id).await;
+            return self.clear_downloaded(id);
         }
 
-        sqlx::query(
-            r#"
-            UPDATE terminology_versions
-            SET file_path = ?, downloaded_at = ?
-            WHERE id = ?
-            "#,
-        )
-        .bind(file_path)
-        .bind(Utc::now().to_rfc3339())
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(TERMINOLOGY_VERSIONS)?;
 
+            let version_bytes = match table.get(id)? {
+                Some(value) => {
+                    let bytes = value.value().to_vec();
+                    drop(value);
+                    Some(bytes)
+                }
+                None => None,
+            };
+
+            if let Some(bytes) = version_bytes {
+                let mut version: TerminologyVersion = bincode::deserialize(&bytes)?;
+                version.file_path = Some(file_path.to_string());
+                version.downloaded_at = Some(Utc::now());
+
+                let new_bytes = bincode::serialize(&version)?;
+                table.insert(id, new_bytes.as_slice())?;
+            }
+        }
+        write_txn.commit()?;
         Ok(())
     }
 
     /// Clear download metadata (file_path and downloaded_at) for a version
-    pub async fn clear_downloaded(&self, id: i64) -> Result<(), StorageError> {
-        sqlx::query(
-            r#"
-            UPDATE terminology_versions
-            SET file_path = NULL, downloaded_at = NULL
-            WHERE id = ?
-            "#,
-        )
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+    pub fn clear_downloaded(&self, id: u64) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(TERMINOLOGY_VERSIONS)?;
 
+            let version_bytes = match table.get(id)? {
+                Some(value) => {
+                    let bytes = value.value().to_vec();
+                    drop(value);
+                    Some(bytes)
+                }
+                None => None,
+            };
+
+            if let Some(bytes) = version_bytes {
+                let mut version: TerminologyVersion = bincode::deserialize(&bytes)?;
+                version.file_path = None;
+                version.downloaded_at = None;
+
+                let new_bytes = bincode::serialize(&version)?;
+                table.insert(id, new_bytes.as_slice())?;
+            }
+        }
+        write_txn.commit()?;
         Ok(())
     }
 
     /// Mark a version as the latest for its terminology type
-    pub async fn mark_as_latest(
-        &self,
-        id: i64,
-        terminology_type: &str,
-    ) -> Result<(), StorageError> {
-        // First, unmark all other versions for this terminology type
-        sqlx::query(
-            r#"
-            UPDATE terminology_versions
-            SET is_latest = 0
-            WHERE terminology_type = ?
-            "#,
-        )
-        .bind(terminology_type)
-        .execute(&self.pool)
-        .await?;
+    pub fn mark_as_latest(&self, id: u64, terminology_type: &str) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(TERMINOLOGY_VERSIONS)?;
 
-        // Then mark this version as latest
-        sqlx::query(
-            r#"
-            UPDATE terminology_versions
-            SET is_latest = 1
-            WHERE id = ?
-            "#,
-        )
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+            // Unmark all other versions for this terminology type
+            let mut updates = Vec::new();
+            for item in table.iter()? {
+                let (key, value) = item?;
+                let mut version: TerminologyVersion = bincode::deserialize(value.value())?;
 
+                if version.terminology_type == terminology_type {
+                    if version.id == id {
+                        version.is_latest = true;
+                    } else {
+                        version.is_latest = false;
+                    }
+                    updates.push((key.value(), version));
+                }
+            }
+
+            // Apply updates
+            for (key, version) in updates {
+                let bytes = bincode::serialize(&version)?;
+                table.insert(key, bytes.as_slice())?;
+            }
+        }
+        write_txn.commit()?;
         Ok(())
     }
 
     /// Get the latest version for a terminology type
-    pub async fn get_latest(
-        &self,
-        terminology_type: &str,
-    ) -> Result<Option<TerminologyVersion>, StorageError> {
-        let result = sqlx::query_as::<_, TerminologyVersion>(
-            r#"
-            SELECT id, terminology_type, version, effective_date,
-                   download_url, file_path, downloaded_at, is_latest, created_at,
-                   content_item_identifier, content_item_version, sha256_hash, sct_base_version,
-                   imported, imported_at
-            FROM terminology_versions
-            WHERE terminology_type = ? AND is_latest = 1
-            LIMIT 1
-            "#,
-        )
-        .bind(terminology_type)
-        .fetch_optional(&self.pool)
-        .await?;
+    pub fn get_latest(&self, terminology_type: &str) -> Result<Option<TerminologyVersion>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TERMINOLOGY_VERSIONS)?;
 
-        Ok(result)
+        for item in table.iter()? {
+            let (_, value) = item?;
+            let version: TerminologyVersion = bincode::deserialize(value.value())?;
+
+            if version.terminology_type == terminology_type && version.is_latest {
+                return Ok(Some(version));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Get all versions for a terminology type
-    pub async fn get_all_versions(
-        &self,
-        terminology_type: &str,
-    ) -> Result<Vec<TerminologyVersion>, StorageError> {
-        let results = sqlx::query_as::<_, TerminologyVersion>(
-            r#"
-            SELECT id, terminology_type, version, effective_date,
-                   download_url, file_path, downloaded_at, is_latest, created_at,
-                   content_item_identifier, content_item_version, sha256_hash, sct_base_version,
-                   imported, imported_at
-            FROM terminology_versions
-            WHERE terminology_type = ?
-            ORDER BY created_at DESC
-            "#,
-        )
-        .bind(terminology_type)
-        .fetch_all(&self.pool)
-        .await?;
+    pub fn get_all_versions(&self, terminology_type: &str) -> Result<Vec<TerminologyVersion>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TERMINOLOGY_VERSIONS)?;
 
-        Ok(results)
+        let mut versions = Vec::new();
+        for item in table.iter()? {
+            let (_, value) = item?;
+            let version: TerminologyVersion = bincode::deserialize(value.value())?;
+
+            if version.terminology_type == terminology_type {
+                versions.push(version);
+            }
+        }
+
+        // Sort by created_at descending
+        versions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        Ok(versions)
     }
 
     /// Get all latest versions across all terminology types
-    pub async fn get_all_latest(&self) -> Result<Vec<TerminologyVersion>, StorageError> {
-        let results = sqlx::query_as::<_, TerminologyVersion>(
-            r#"
-            SELECT id, terminology_type, version, effective_date,
-                   download_url, file_path, downloaded_at, is_latest, created_at,
-                   content_item_identifier, content_item_version, sha256_hash, sct_base_version,
-                   imported, imported_at
-            FROM terminology_versions
-            WHERE is_latest = 1
-            ORDER BY terminology_type
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
+    pub fn get_all_latest(&self) -> Result<Vec<TerminologyVersion>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TERMINOLOGY_VERSIONS)?;
 
-        Ok(results)
+        let mut versions = Vec::new();
+        for item in table.iter()? {
+            let (_, value) = item?;
+            let version: TerminologyVersion = bincode::deserialize(value.value())?;
+
+            if version.is_latest {
+                versions.push(version);
+            }
+        }
+
+        // Sort by terminology_type
+        versions.sort_by(|a, b| a.terminology_type.cmp(&b.terminology_type));
+
+        Ok(versions)
     }
 
     /// Mark a version as imported
-    pub async fn mark_imported(&self, id: i64) -> Result<(), StorageError> {
-        sqlx::query(
-            r#"
-            UPDATE terminology_versions
-            SET imported = 1, imported_at = ?
-            WHERE id = ?
-            "#,
-        )
-        .bind(Utc::now().to_rfc3339())
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+    pub fn mark_imported(&self, id: u64) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(TERMINOLOGY_VERSIONS)?;
 
+            let version_bytes = match table.get(id)? {
+                Some(value) => {
+                    let bytes = value.value().to_vec();
+                    drop(value);
+                    Some(bytes)
+                }
+                None => None,
+            };
+
+            if let Some(bytes) = version_bytes {
+                let mut version: TerminologyVersion = bincode::deserialize(&bytes)?;
+                version.imported = true;
+                version.imported_at = Some(Utc::now());
+
+                let new_bytes = bincode::serialize(&version)?;
+                table.insert(id, new_bytes.as_slice())?;
+            }
+        }
+        write_txn.commit()?;
         Ok(())
     }
 
-    /// Get access to the database pool for import operations
-    pub fn pool(&self) -> &SqlitePool {
-        &self.pool
+    /// Insert a SNOMED concept
+    pub fn insert_snomed_concept(&self, concept: &SnomedConcept) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(SNOMED_CONCEPTS)?;
+            let bytes = bincode::serialize(concept)?;
+            table.insert(concept.id.as_str(), bytes.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Insert a SNOMED description
+    pub fn insert_snomed_description(&self, description: &SnomedDescription) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(SNOMED_DESCRIPTIONS)?;
+            let bytes = bincode::serialize(description)?;
+            table.insert(description.id.as_str(), bytes.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Get a SNOMED concept by ID
+    pub fn get_snomed_concept(&self, id: &str) -> Result<Option<SnomedConcept>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(SNOMED_CONCEPTS)?;
+
+        if let Some(value) = table.get(id)? {
+            let concept: SnomedConcept = bincode::deserialize(value.value())?;
+            Ok(Some(concept))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get all descriptions for a SNOMED concept
+    pub fn get_snomed_descriptions(&self, concept_id: &str) -> Result<Vec<SnomedDescription>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(SNOMED_DESCRIPTIONS)?;
+
+        let mut descriptions = Vec::new();
+        for item in table.iter()? {
+            let (_, value) = item?;
+            let desc: SnomedDescription = bincode::deserialize(value.value())?;
+
+            if desc.concept_id == concept_id {
+                descriptions.push(desc);
+            }
+        }
+
+        Ok(descriptions)
+    }
+
+    /// Insert an AMT code
+    pub fn insert_amt_code(&self, code: &AmtCode) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(AMT_CODES)?;
+            let bytes = bincode::serialize(code)?;
+            table.insert(code.id.as_str(), bytes.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Get an AMT code by ID
+    pub fn get_amt_code(&self, id: &str) -> Result<Option<AmtCode>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(AMT_CODES)?;
+
+        if let Some(value) = table.get(id)? {
+            let code: AmtCode = bincode::deserialize(value.value())?;
+            Ok(Some(code))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Insert a ValueSet
+    pub fn insert_valueset(&self, valueset: &ValueSet) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(VALUESETS)?;
+            let bytes = bincode::serialize(valueset)?;
+            table.insert(valueset.url.as_str(), bytes.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Get a ValueSet by URL
+    pub fn get_valueset(&self, url: &str) -> Result<Option<ValueSet>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(VALUESETS)?;
+
+        if let Some(value) = table.get(url)? {
+            let valueset: ValueSet = bincode::deserialize(value.value())?;
+            Ok(Some(valueset))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get all ValueSets
+    pub fn get_all_valuesets(&self) -> Result<Vec<ValueSet>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(VALUESETS)?;
+
+        let mut valuesets = Vec::new();
+        for item in table.iter()? {
+            let (_, value) = item?;
+            let valueset: ValueSet = bincode::deserialize(value.value())?;
+            valuesets.push(valueset);
+        }
+
+        Ok(valuesets)
+    }
+
+    /// Insert a ValueSet concept
+    pub fn insert_valueset_concept(&self, concept: &ValueSetConcept) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(VALUESET_CONCEPTS)?;
+            let bytes = bincode::serialize(concept)?;
+            table.insert(
+                (concept.valueset_url.as_str(), concept.code.as_str()),
+                bytes.as_slice(),
+            )?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Get all concepts in a ValueSet
+    pub fn get_valueset_concepts(&self, valueset_url: &str) -> Result<Vec<ValueSetConcept>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(VALUESET_CONCEPTS)?;
+
+        let mut concepts = Vec::new();
+        for item in table.iter()? {
+            let (_, value) = item?;
+            let concept: ValueSetConcept = bincode::deserialize(value.value())?;
+
+            if concept.valueset_url == valueset_url {
+                concepts.push(concept);
+            }
+        }
+
+        Ok(concepts)
+    }
+
+    /// Check if a code exists in a ValueSet
+    pub fn valueset_contains_code(
+        &self,
+        valueset_url: &str,
+        system: &str,
+        code: &str,
+    ) -> Result<bool, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(VALUESET_CONCEPTS)?;
+
+        for item in table.iter()? {
+            let (_, value) = item?;
+            let concept: ValueSetConcept = bincode::deserialize(value.value())?;
+
+            if concept.valueset_url == valueset_url
+                && concept.system == system
+                && concept.code == code
+            {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     /// Get the database file path
@@ -664,7 +644,6 @@ impl TerminologyStorage {
     }
 
     /// Sanitize a version string to make it safe for use in filenames
-    /// Replaces spaces with underscores and removes/replaces problematic characters
     fn sanitize_version_for_filename(version: &str) -> String {
         version
             .replace(' ', "_")
@@ -687,18 +666,187 @@ impl TerminologyStorage {
 
     /// Generate a file path for a terminology download
     pub fn generate_file_path(&self, terminology_type: &str, version: &str) -> PathBuf {
-        // Sanitize version string to ensure valid filename
         let safe_version = Self::sanitize_version_for_filename(version);
 
-        // Determine the correct file extension based on terminology type
         let extension = match terminology_type {
-            "snomed" => "zip",     // SNOMED RF2 SNAPSHOT is a ZIP archive
-            "amt" => "csv",        // AMT is in CSV format
-            "valuesets" => "json", // FHIR R4 ValueSet Bundles are JSON
-            "loinc" => "zip",      // LOINC (not used, but would be ZIP)
-            _ => "zip",            // Default to ZIP for unknown types
+            "snomed" => "zip",
+            "amt" => "csv",
+            "valuesets" => "json",
+            "loinc" => "zip",
+            _ => "zip",
         };
         let filename = format!("{}_{}.{}", terminology_type, safe_version, extension);
         self.data_dir.join(filename)
+    }
+
+    /// Get reference to the database for batch operations
+    pub fn database(&self) -> &Database {
+        &self.db
+    }
+
+    /// Delete all SNOMED data for a specific version
+    pub fn delete_snomed_by_version(&self, version_id: u64) -> Result<i64, StorageError> {
+        let mut deleted_count = 0i64;
+
+        let write_txn = self.db.begin_write()?;
+        {
+            // Delete concepts
+            let mut concepts_table = write_txn.open_table(SNOMED_CONCEPTS)?;
+            let mut to_delete = Vec::new();
+
+            for item in concepts_table.iter()? {
+                let (key, value) = item?;
+                let concept: SnomedConcept = bincode::deserialize(value.value())?;
+                if concept.version_id == version_id {
+                    to_delete.push(key.value().to_string());
+                }
+            }
+
+            for key in &to_delete {
+                concepts_table.remove(key.as_str())?;
+                deleted_count += 1;
+            }
+
+            // Delete descriptions
+            let mut descriptions_table = write_txn.open_table(SNOMED_DESCRIPTIONS)?;
+            to_delete.clear();
+
+            for item in descriptions_table.iter()? {
+                let (key, value) = item?;
+                let desc: SnomedDescription = bincode::deserialize(value.value())?;
+                if desc.version_id == version_id {
+                    to_delete.push(key.value().to_string());
+                }
+            }
+
+            for key in &to_delete {
+                descriptions_table.remove(key.as_str())?;
+                deleted_count += 1;
+            }
+        }
+        write_txn.commit()?;
+
+        Ok(deleted_count)
+    }
+
+    /// Delete all AMT data for a specific version
+    pub fn delete_amt_by_version(&self, version_id: u64) -> Result<i64, StorageError> {
+        let mut deleted_count = 0i64;
+
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(AMT_CODES)?;
+            let mut to_delete = Vec::new();
+
+            for item in table.iter()? {
+                let (key, value) = item?;
+                let code: AmtCode = bincode::deserialize(value.value())?;
+                if code.version_id == version_id {
+                    to_delete.push(key.value().to_string());
+                }
+            }
+
+            for key in &to_delete {
+                table.remove(key.as_str())?;
+                deleted_count += 1;
+            }
+        }
+        write_txn.commit()?;
+
+        Ok(deleted_count)
+    }
+
+    /// Delete all ValueSet data for a specific version
+    pub fn delete_valuesets_by_version(&self, version_id: u64) -> Result<i64, StorageError> {
+        let mut deleted_count = 0i64;
+
+        let write_txn = self.db.begin_write()?;
+        {
+            // First, collect ValueSet URLs to delete
+            let valuesets_table = write_txn.open_table(VALUESETS)?;
+            let mut valueset_urls = Vec::new();
+
+            for item in valuesets_table.iter()? {
+                let (key, value) = item?;
+                let valueset: ValueSet = bincode::deserialize(value.value())?;
+                if valueset.version_id == version_id {
+                    valueset_urls.push(key.value().to_string());
+                }
+            }
+
+            // Delete ValueSet concepts for these URLs
+            let mut concepts_table = write_txn.open_table(VALUESET_CONCEPTS)?;
+            let mut concepts_to_delete = Vec::new();
+
+            for item in concepts_table.iter()? {
+                let (key, _) = item?;
+                let (url, code) = key.value();
+                if valueset_urls.contains(&url.to_string()) {
+                    concepts_to_delete.push((url.to_string(), code.to_string()));
+                }
+            }
+
+            for (url, code) in &concepts_to_delete {
+                concepts_table.remove((url.as_str(), code.as_str()))?;
+                deleted_count += 1;
+            }
+
+            // Delete ValueSets
+            let mut valuesets_table = write_txn.open_table(VALUESETS)?;
+            for url in &valueset_urls {
+                valuesets_table.remove(url.as_str())?;
+                deleted_count += 1;
+            }
+        }
+        write_txn.commit()?;
+
+        Ok(deleted_count)
+    }
+
+    /// Clear imported status for a version
+    pub fn clear_imported_status(&self, version_id: u64) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(TERMINOLOGY_VERSIONS)?;
+
+            let version_bytes = match table.get(version_id)? {
+                Some(value) => {
+                    let bytes = value.value().to_vec();
+                    drop(value);
+                    Some(bytes)
+                }
+                None => None,
+            };
+
+            if let Some(bytes) = version_bytes {
+                let mut version: TerminologyVersion = bincode::deserialize(&bytes)?;
+                version.imported = false;
+                version.imported_at = None;
+
+                let new_bytes = bincode::serialize(&version)?;
+                table.insert(version_id, new_bytes.as_slice())?;
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Get all versions that are "ghost" records (have downloaded_at but no file_path)
+    pub fn get_ghost_versions(&self) -> Result<Vec<u64>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TERMINOLOGY_VERSIONS)?;
+
+        let mut ghost_ids = Vec::new();
+        for item in table.iter()? {
+            let (_, value) = item?;
+            let version: TerminologyVersion = bincode::deserialize(value.value())?;
+
+            if version.downloaded_at.is_some() &&
+               (version.file_path.is_none() || version.file_path.as_ref().map_or(true, |p| p.is_empty())) {
+                ghost_ids.push(version.id);
+            }
+        }
+
+        Ok(ghost_ids)
     }
 }

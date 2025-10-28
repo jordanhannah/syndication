@@ -1,4 +1,7 @@
+use crate::import::TerminologyImporter;
 use crate::ncts::{FeedEntry, NctsClient, TerminologyType};
+use crate::queries::TerminologyQueries;
+use crate::search::TerminologySearch;
 use crate::storage::{TerminologyStorage, TerminologyVersion};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -32,6 +35,7 @@ pub struct StorageStats {
 pub struct AppState {
     pub ncts_client: NctsClient,
     pub storage: Arc<Mutex<TerminologyStorage>>,
+    pub searcher: Arc<Mutex<TerminologySearch>>,
 }
 
 /// Fetch the latest version information for a terminology type
@@ -106,7 +110,6 @@ pub async fn sync_terminology(
     // Check if we already have this version
     let existing = storage
         .get_latest(&terminology_type)
-        .await
         .map_err(|e| format!("Storage error: {}", e))?;
 
     if let Some(existing) = existing {
@@ -146,7 +149,6 @@ pub async fn sync_terminology(
             latest_entry.sha256_hash.as_deref(),
             latest_entry.sct_base_version.as_deref(),
         )
-        .await
         .map_err(|e| format!("Failed to record version: {}", e))?;
 
     // Download the file if a download URL is available
@@ -193,7 +195,6 @@ pub async fn sync_terminology(
                 let file_path_str = file_path.to_str().unwrap().to_string();
                 storage
                     .mark_downloaded(version_id, &file_path_str)
-                    .await
                     .map_err(|e| format!("Failed to mark downloaded: {}", e))?;
             }
             Err(e) => {
@@ -210,7 +211,6 @@ pub async fn sync_terminology(
     // Mark as latest
     storage
         .mark_as_latest(version_id, &terminology_type)
-        .await
         .map_err(|e| format!("Failed to mark as latest: {}", e))?;
 
     Ok(SyncResult {
@@ -249,7 +249,6 @@ pub async fn get_local_latest(
 
     storage
         .get_latest(&terminology_type)
-        .await
         .map_err(|e| format!("Storage error: {}", e))
 }
 
@@ -263,7 +262,6 @@ pub async fn get_local_versions(
 
     storage
         .get_all_versions(&terminology_type)
-        .await
         .map_err(|e| format!("Storage error: {}", e))
 }
 
@@ -276,7 +274,6 @@ pub async fn get_all_local_latest(
 
     storage
         .get_all_latest()
-        .await
         .map_err(|e| format!("Storage error: {}", e))
 }
 
@@ -288,11 +285,11 @@ pub async fn import_terminology(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let storage = state.storage.lock().await;
+    let mut searcher = state.searcher.lock().await;
 
     // Get the latest version for this terminology
     let version = storage
         .get_latest(&terminology_type)
-        .await
         .map_err(|e| format!("Failed to get latest version: {}", e))?;
 
     let version = version.ok_or_else(|| {
@@ -314,26 +311,26 @@ pub async fn import_terminology(
         .ok_or_else(|| format!("No file path found for {}", terminology_type))?;
 
     // Create importer with app handle for progress events
-    let importer = crate::import::TerminologyImporter::new(&storage, version.id)
+    let importer = TerminologyImporter::new(&storage, version.id)
         .with_app_handle(app_handle);
 
-    // Import based on terminology type
+    // Import based on terminology type (passing searcher for index building)
     match terminology_type.as_str() {
         "snomed" => {
             importer
-                .import_snomed(std::path::Path::new(&file_path))
+                .import_snomed(std::path::Path::new(&file_path), &mut searcher)
                 .await
                 .map_err(|e| format!("SNOMED import failed: {}", e))?;
         }
         "amt" => {
             importer
-                .import_amt(std::path::Path::new(&file_path))
+                .import_amt(std::path::Path::new(&file_path), &mut searcher)
                 .await
                 .map_err(|e| format!("AMT import failed: {}", e))?;
         }
         "valuesets" => {
             importer
-                .import_valuesets(std::path::Path::new(&file_path))
+                .import_valuesets(std::path::Path::new(&file_path), &mut searcher)
                 .await
                 .map_err(|e| format!("ValueSets import failed: {}", e))?;
         }
@@ -345,7 +342,6 @@ pub async fn import_terminology(
     // Mark as imported
     storage
         .mark_imported(version.id)
-        .await
         .map_err(|e| format!("Failed to mark as imported: {}", e))?;
 
     Ok(format!(
@@ -361,15 +357,13 @@ pub async fn search_terminology(
     terminology_types: Vec<String>,
     limit: Option<i32>,
     state: State<'_, AppState>,
-) -> Result<Vec<crate::queries::SearchResult>, String> {
-    let storage = state.storage.lock().await;
-    let pool = storage.pool();
-    let limit = limit.unwrap_or(20);
+) -> Result<Vec<crate::search::SearchResult>, String> {
+    let searcher = state.searcher.lock().await;
+    let limit = limit.unwrap_or(20) as usize;
 
     if terminology_types.is_empty() || terminology_types.contains(&"all".to_string()) {
         // Search all terminologies
-        crate::queries::TerminologyQueries::search_all(pool, &query, limit)
-            .await
+        TerminologyQueries::search_all(&searcher, &query, limit)
             .map_err(|e| format!("Search failed: {}", e))
     } else {
         let mut results = Vec::new();
@@ -378,22 +372,19 @@ pub async fn search_terminology(
             match term_type.as_str() {
                 "snomed" => {
                     let snomed_results =
-                        crate::queries::TerminologyQueries::search_snomed(pool, &query, limit)
-                            .await
+                        TerminologyQueries::search_snomed(&searcher, &query, limit)
                             .map_err(|e| format!("SNOMED search failed: {}", e))?;
                     results.extend(snomed_results);
                 }
                 "amt" => {
                     let amt_results =
-                        crate::queries::TerminologyQueries::search_amt(pool, &query, limit)
-                            .await
+                        TerminologyQueries::search_amt(&searcher, &query, limit)
                             .map_err(|e| format!("AMT search failed: {}", e))?;
                     results.extend(amt_results);
                 }
                 "valuesets" => {
                     let valueset_results =
-                        crate::queries::TerminologyQueries::search_valuesets(pool, &query, limit)
-                            .await
+                        TerminologyQueries::search_valuesets(&searcher, &query, limit)
                             .map_err(|e| format!("ValueSet search failed: {}", e))?;
                     results.extend(valueset_results);
                 }
@@ -413,15 +404,12 @@ pub async fn lookup_code(
     state: State<'_, AppState>,
 ) -> Result<Option<crate::queries::CodeLookupResult>, String> {
     let storage = state.storage.lock().await;
-    let pool = storage.pool();
 
     if system.contains("snomed") {
-        crate::queries::TerminologyQueries::lookup_snomed_code(pool, &code)
-            .await
+        TerminologyQueries::lookup_snomed_code(&storage, &code)
             .map_err(|e| format!("Lookup failed: {}", e))
     } else if system.contains("amt") {
-        crate::queries::TerminologyQueries::lookup_amt_code(pool, &code)
-            .await
+        TerminologyQueries::lookup_amt_code(&storage, &code)
             .map_err(|e| format!("Lookup failed: {}", e))
     } else {
         Err(format!("Unsupported system: {}", system))
@@ -435,10 +423,8 @@ pub async fn expand_valueset(
     state: State<'_, AppState>,
 ) -> Result<Option<crate::queries::ValueSetExpansion>, String> {
     let storage = state.storage.lock().await;
-    let pool = storage.pool();
 
-    crate::queries::TerminologyQueries::expand_valueset(pool, &valueset_url)
-        .await
+    TerminologyQueries::expand_valueset(&storage, &valueset_url)
         .map_err(|e| format!("ValueSet expansion failed: {}", e))
 }
 
@@ -451,10 +437,8 @@ pub async fn validate_code(
     state: State<'_, AppState>,
 ) -> Result<crate::queries::ValidationResult, String> {
     let storage = state.storage.lock().await;
-    let pool = storage.pool();
 
-    crate::queries::TerminologyQueries::validate_code(pool, &code, &system, &valueset_url)
-        .await
+    TerminologyQueries::validate_code(&storage, &code, &system, &valueset_url)
         .map_err(|e| format!("Code validation failed: {}", e))
 }
 
@@ -462,57 +446,20 @@ pub async fn validate_code(
 #[tauri::command]
 pub async fn list_valuesets(
     state: State<'_, AppState>,
-) -> Result<Vec<(String, Option<String>)>, String> {
+) -> Result<Vec<crate::queries::ValueSetListItem>, String> {
     let storage = state.storage.lock().await;
-    let pool = storage.pool();
 
-    crate::queries::TerminologyQueries::list_valuesets(pool)
-        .await
+    TerminologyQueries::list_valuesets(&storage)
         .map_err(|e| format!("Failed to list ValueSets: {}", e))
 }
 
 /// Get storage statistics (record counts)
-#[tauri::command]
-pub async fn get_storage_stats(state: State<'_, AppState>) -> Result<StorageStats, String> {
-    let storage = state.storage.lock().await;
-    let pool = storage.pool();
-
-    // Query record counts from each table
-    let snomed_concepts: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM snomed_concepts")
-        .fetch_one(pool)
-        .await
-        .unwrap_or((0,));
-
-    let snomed_descriptions: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM snomed_descriptions")
-        .fetch_one(pool)
-        .await
-        .unwrap_or((0,));
-
-    let amt_codes: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM amt_codes")
-        .fetch_one(pool)
-        .await
-        .unwrap_or((0,));
-
-    let valuesets: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM valuesets")
-        .fetch_one(pool)
-        .await
-        .unwrap_or((0,));
-
-    // Get database file size
-    let db_path = storage.db_path();
-    let database_size_mb = match tokio::fs::metadata(&db_path).await {
-        Ok(metadata) => metadata.len() as f64 / 1_048_576.0, // Convert bytes to MB
-        Err(_) => 0.0,
-    };
-
-    Ok(StorageStats {
-        snomed_concepts: snomed_concepts.0,
-        snomed_descriptions: snomed_descriptions.0,
-        amt_codes: amt_codes.0,
-        valuesets: valuesets.0,
-        database_size_mb,
-    })
-}
+/// TEMPORARILY DISABLED - requires table iteration optimization for redb
+// #[tauri::command]
+// pub async fn get_storage_stats(state: State<'_, AppState>) -> Result<StorageStats, String> {
+//     // TODO: Implement with redb table iteration
+//     Err("Storage stats temporarily disabled during redb migration".to_string())
+// }
 
 /// Test NCTS connection
 #[tauri::command]
@@ -584,7 +531,6 @@ pub async fn get_detailed_storage_info(
     state: State<'_, AppState>,
 ) -> Result<StorageBreakdown, String> {
     let storage = state.storage.lock().await;
-    let pool = storage.pool();
 
     let mut terminologies = Vec::new();
     let mut total_file_size = 0u64;
@@ -592,7 +538,6 @@ pub async fn get_detailed_storage_info(
     // Get all terminology versions
     let all_versions = storage
         .get_all_latest()
-        .await
         .map_err(|e| format!("Failed to get versions: {}", e))?;
 
     // Process each terminology type
@@ -620,48 +565,11 @@ pub async fn get_detailed_storage_info(
             (0, None, false)
         };
 
-        // Get database record counts
-        let (db_records, has_data) = match *terminology_type {
-            "snomed" => {
-                let count: (i64,) = sqlx::query_as(
-                    "SELECT COUNT(*) FROM snomed_concepts WHERE version_id = (SELECT id FROM terminology_versions WHERE terminology_type = 'snomed' AND is_latest = 1)"
-                )
-                .fetch_one(pool)
-                .await
-                .unwrap_or((0,));
-                (count.0, count.0 > 0)
-            }
-            "amt" => {
-                let count: (i64,) = sqlx::query_as(
-                    "SELECT COUNT(*) FROM amt_codes WHERE version_id = (SELECT id FROM terminology_versions WHERE terminology_type = 'amt' AND is_latest = 1)"
-                )
-                .fetch_one(pool)
-                .await
-                .unwrap_or((0,));
-                (count.0, count.0 > 0)
-            }
-            "valuesets" => {
-                let count: (i64,) = sqlx::query_as(
-                    "SELECT COUNT(*) FROM valuesets WHERE version_id = (SELECT id FROM terminology_versions WHERE terminology_type = 'valuesets' AND is_latest = 1)"
-                )
-                .fetch_one(pool)
-                .await
-                .unwrap_or((0,));
-                (count.0, count.0 > 0)
-            }
-            _ => (0, false),
-        };
-
-        // Estimate database size per terminology (rough approximation)
-        // SNOMED: ~2KB per concept (with descriptions and relationships)
-        // AMT: ~500 bytes per code
-        // ValueSets: ~1KB per valueset
-        let db_size_estimate = match *terminology_type {
-            "snomed" => db_records as u64 * 2048,
-            "amt" => db_records as u64 * 512,
-            "valuesets" => db_records as u64 * 1024,
-            _ => 0,
-        };
+        // Record counting temporarily disabled during redb migration
+        // TODO: Implement efficient table iteration for redb
+        let db_records = 0i64;
+        let has_data = false;
+        let db_size_estimate = 0u64;
 
         total_file_size += file_size;
 
@@ -703,7 +611,6 @@ pub async fn delete_terminology_file(
     // Get the version to find the file path
     let version = storage
         .get_latest(&terminology_type)
-        .await
         .map_err(|e| format!("Failed to get version: {}", e))?;
 
     if let Some(version) = version {
@@ -717,7 +624,6 @@ pub async fn delete_terminology_file(
                 // Clear download metadata (file_path and downloaded_at)
                 storage
                     .clear_downloaded(version.id)
-                    .await
                     .map_err(|e| format!("Failed to update database: {}", e))?;
 
                 Ok(format!("Deleted file: {}", file_path))
@@ -740,7 +646,7 @@ pub async fn delete_terminology_data(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let storage = state.storage.lock().await;
-    let pool = storage.pool();
+    let mut searcher = state.searcher.lock().await;
 
     // Emit progress: Starting
     let _ = app_handle.emit("delete-progress", SyncProgress {
@@ -752,210 +658,62 @@ pub async fn delete_terminology_data(
     // Get the version ID
     let version = storage
         .get_latest(&terminology_type)
-        .await
         .map_err(|e| format!("Failed to get version: {}", e))?;
 
     if let Some(version) = version {
         // Small delay so user sees "Starting" phase
         tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
 
-        // Emit progress: Counting
+        // Emit progress: Deleting
         let _ = app_handle.emit("delete-progress", SyncProgress {
-            phase: "Counting".to_string(),
-            message: "Counting records to delete...".to_string(),
-            percentage: 5.0,
+            phase: "Deleting".to_string(),
+            message: format!("Deleting {} data...", terminology_type),
+            percentage: 10.0,
         });
 
-        // Count and delete records based on terminology type
+        // Delete records based on terminology type
         let deleted_count = match terminology_type.as_str() {
             "snomed" => {
-                // Count concepts first
-                let count: (i64,) = sqlx::query_as(
-                    "SELECT COUNT(*) FROM snomed_concepts WHERE version_id = ?"
-                )
-                .bind(version.id)
-                .fetch_one(pool)
-                .await
-                .unwrap_or((0,));
-
-                let total_count = count.0;
-
-                // Small delay so user sees count
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-                // Emit progress: Starting deletion
-                let _ = app_handle.emit("delete-progress", SyncProgress {
-                    phase: "Deleting".to_string(),
-                    message: format!("Deleting {} SNOMED concepts...", total_count),
-                    percentage: 10.0,
-                });
-
-                // Delete in batches with progress updates
-                let batch_size = 10000;
-                let mut total_deleted = 0i64;
-
-                loop {
-                    // Delete one batch
-                    let result = sqlx::query("DELETE FROM snomed_concepts WHERE id IN (SELECT id FROM snomed_concepts WHERE version_id = ? LIMIT ?)")
-                        .bind(version.id)
-                        .bind(batch_size)
-                        .execute(pool)
-                        .await
-                        .map_err(|e| format!("Failed to delete SNOMED concepts: {}", e))?;
-
-                    let rows_deleted = result.rows_affected() as i64;
-                    if rows_deleted == 0 {
-                        break;
-                    }
-
-                    total_deleted += rows_deleted;
-
-                    // Calculate progress (10% to 75% range for deletion)
-                    let progress_percentage = if total_count > 0 {
-                        10.0 + (total_deleted as f32 / total_count as f32 * 65.0)
-                    } else {
-                        75.0
-                    };
-
-                    // Emit progress update
-                    let _ = app_handle.emit("delete-progress", SyncProgress {
-                        phase: "Deleting".to_string(),
-                        message: format!("Deleted {} / {} SNOMED concepts...", total_deleted, total_count),
-                        percentage: progress_percentage,
-                    });
-
-                    // Small delay to allow UI updates
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                }
-
-                total_count
+                storage
+                    .delete_snomed_by_version(version.id)
+                    .map_err(|e| format!("Failed to delete SNOMED data: {}", e))?
             }
             "amt" => {
-                // Count codes first
-                let count: (i64,) = sqlx::query_as(
-                    "SELECT COUNT(*) FROM amt_codes WHERE version_id = ?"
-                )
-                .bind(version.id)
-                .fetch_one(pool)
-                .await
-                .unwrap_or((0,));
-
-                let total_count = count.0;
-
-                // Small delay so user sees count
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-                // Emit progress: Starting deletion
-                let _ = app_handle.emit("delete-progress", SyncProgress {
-                    phase: "Deleting".to_string(),
-                    message: format!("Deleting {} AMT codes...", total_count),
-                    percentage: 10.0,
-                });
-
-                // Delete in batches with progress updates
-                let batch_size = 5000;
-                let mut total_deleted = 0i64;
-
-                loop {
-                    // Delete one batch
-                    let result = sqlx::query("DELETE FROM amt_codes WHERE id IN (SELECT id FROM amt_codes WHERE version_id = ? LIMIT ?)")
-                        .bind(version.id)
-                        .bind(batch_size)
-                        .execute(pool)
-                        .await
-                        .map_err(|e| format!("Failed to delete AMT codes: {}", e))?;
-
-                    let rows_deleted = result.rows_affected() as i64;
-                    if rows_deleted == 0 {
-                        break;
-                    }
-
-                    total_deleted += rows_deleted;
-
-                    // Calculate progress (10% to 75% range for deletion)
-                    let progress_percentage = if total_count > 0 {
-                        10.0 + (total_deleted as f32 / total_count as f32 * 65.0)
-                    } else {
-                        75.0
-                    };
-
-                    // Emit progress update
-                    let _ = app_handle.emit("delete-progress", SyncProgress {
-                        phase: "Deleting".to_string(),
-                        message: format!("Deleted {} / {} AMT codes...", total_deleted, total_count),
-                        percentage: progress_percentage,
-                    });
-
-                    // Small delay to allow UI updates
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                }
-
-                total_count
+                storage
+                    .delete_amt_by_version(version.id)
+                    .map_err(|e| format!("Failed to delete AMT data: {}", e))?
             }
             "valuesets" => {
-                // Count valuesets first
-                let count: (i64,) = sqlx::query_as(
-                    "SELECT COUNT(*) FROM valuesets WHERE version_id = ?"
-                )
-                .bind(version.id)
-                .fetch_one(pool)
-                .await
-                .unwrap_or((0,));
-
-                let total_count = count.0;
-
-                // Small delay so user sees count
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-                // Emit progress: Starting deletion
-                let _ = app_handle.emit("delete-progress", SyncProgress {
-                    phase: "Deleting".to_string(),
-                    message: format!("Deleting {} ValueSets...", total_count),
-                    percentage: 10.0,
-                });
-
-                // Delete in batches with progress updates
-                let batch_size = 100;
-                let mut total_deleted = 0i64;
-
-                loop {
-                    // Delete one batch
-                    let result = sqlx::query("DELETE FROM valuesets WHERE id IN (SELECT id FROM valuesets WHERE version_id = ? LIMIT ?)")
-                        .bind(version.id)
-                        .bind(batch_size)
-                        .execute(pool)
-                        .await
-                        .map_err(|e| format!("Failed to delete ValueSets: {}", e))?;
-
-                    let rows_deleted = result.rows_affected() as i64;
-                    if rows_deleted == 0 {
-                        break;
-                    }
-
-                    total_deleted += rows_deleted;
-
-                    // Calculate progress (10% to 75% range for deletion)
-                    let progress_percentage = if total_count > 0 {
-                        10.0 + (total_deleted as f32 / total_count as f32 * 65.0)
-                    } else {
-                        75.0
-                    };
-
-                    // Emit progress update
-                    let _ = app_handle.emit("delete-progress", SyncProgress {
-                        phase: "Deleting".to_string(),
-                        message: format!("Deleted {} / {} ValueSets...", total_deleted, total_count),
-                        percentage: progress_percentage,
-                    });
-
-                    // Small delay to allow UI updates
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                }
-
-                total_count
+                storage
+                    .delete_valuesets_by_version(version.id)
+                    .map_err(|e| format!("Failed to delete ValueSets data: {}", e))?
             }
             _ => return Err("Unknown terminology type".to_string()),
         };
+
+        // Emit progress: Clearing indexes
+        let _ = app_handle.emit("delete-progress", SyncProgress {
+            phase: "Clearing Indexes".to_string(),
+            message: "Clearing search indexes...".to_string(),
+            percentage: 70.0,
+        });
+
+        // Clear Tantivy indexes
+        match terminology_type.as_str() {
+            "snomed" => {
+                searcher.clear_snomed()
+                    .map_err(|e| format!("Failed to clear SNOMED index: {}", e))?;
+            }
+            "amt" => {
+                searcher.clear_amt()
+                    .map_err(|e| format!("Failed to clear AMT index: {}", e))?;
+            }
+            "valuesets" => {
+                searcher.clear_valuesets()
+                    .map_err(|e| format!("Failed to clear ValueSets index: {}", e))?;
+            }
+            _ => {}
+        }
 
         // Emit progress: Updating version
         let _ = app_handle.emit("delete-progress", SyncProgress {
@@ -965,10 +723,8 @@ pub async fn delete_terminology_data(
         });
 
         // Update version to mark as not imported
-        sqlx::query("UPDATE terminology_versions SET imported = 0, imported_at = NULL WHERE id = ?")
-            .bind(version.id)
-            .execute(pool)
-            .await
+        storage
+            .clear_imported_status(version.id)
             .map_err(|e| format!("Failed to update version: {}", e))?;
 
         // Emit progress: Complete
@@ -1016,21 +772,20 @@ pub async fn cleanup_ghost_versions(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let storage = state.storage.lock().await;
-    let pool = storage.pool();
 
-    // Find and clean up ghost records - versions that have downloaded_at but no file (or empty file_path)
-    let result = sqlx::query(
-        r#"
-        UPDATE terminology_versions
-        SET file_path = NULL, downloaded_at = NULL
-        WHERE (file_path IS NULL OR file_path = '') AND downloaded_at IS NOT NULL
-        "#,
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Failed to cleanup ghost versions: {}", e))?;
+    // Get all ghost version IDs
+    let ghost_ids = storage
+        .get_ghost_versions()
+        .map_err(|e| format!("Failed to get ghost versions: {}", e))?;
 
-    let cleaned = result.rows_affected();
+    // Clear download metadata for each ghost version
+    for version_id in &ghost_ids {
+        storage
+            .clear_downloaded(*version_id)
+            .map_err(|e| format!("Failed to clear ghost version {}: {}", version_id, e))?;
+    }
+
+    let cleaned = ghost_ids.len();
 
     if cleaned > 0 {
         Ok(format!("Cleaned up {} ghost version record(s)", cleaned))

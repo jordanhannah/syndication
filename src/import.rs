@@ -1,8 +1,9 @@
 use crate::parsers::{AmtCsvParser, SnomedRf2Parser, ValueSetR4Parser};
-use crate::storage::TerminologyStorage;
+use crate::search::TerminologySearch;
+use crate::storage::{AmtCode, SnomedConcept, SnomedDescription, TerminologyStorage, ValueSet, ValueSetConcept};
 use anyhow::{Context, Result};
+use redb::{ReadableTable, TableDefinition};
 use serde::Serialize;
-use sqlx::SqlitePool;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter};
@@ -40,15 +41,22 @@ pub struct ImportProgress {
     pub message: String,
 }
 
+// Redb table definitions for batch operations
+const SNOMED_CONCEPTS: TableDefinition<&str, &[u8]> = TableDefinition::new("snomed_concepts");
+const SNOMED_DESCRIPTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("snomed_descriptions");
+const AMT_CODES: TableDefinition<&str, &[u8]> = TableDefinition::new("amt_codes");
+const VALUESETS: TableDefinition<&str, &[u8]> = TableDefinition::new("valuesets");
+const VALUESET_CONCEPTS: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("valueset_concepts");
+
 /// Import terminology content into the database
 pub struct TerminologyImporter<'a> {
     storage: &'a TerminologyStorage,
-    version_id: i64,
+    version_id: u64,
     app_handle: Option<AppHandle>,
 }
 
 impl<'a> TerminologyImporter<'a> {
-    pub fn new(storage: &'a TerminologyStorage, version_id: i64) -> Self {
+    pub fn new(storage: &'a TerminologyStorage, version_id: u64) -> Self {
         Self {
             storage,
             version_id,
@@ -120,8 +128,8 @@ impl<'a> TerminologyImporter<'a> {
         Ok(count)
     }
 
-    /// Import SNOMED CT-AU SNAPSHOT from ZIP file
-    pub async fn import_snomed(&self, zip_path: &Path) -> Result<()> {
+    /// Import SNOMED CT-AU SNAPSHOT from ZIP file (Phase 1: Concepts + Descriptions only)
+    pub async fn import_snomed(&self, zip_path: &Path, searcher: &mut TerminologySearch) -> Result<()> {
         println!("Importing SNOMED CT-AU from: {:?}", zip_path);
 
         self.emit_progress(ImportProgress {
@@ -157,20 +165,14 @@ impl<'a> TerminologyImporter<'a> {
             message: "Locating RF2 files...".to_string(),
         });
 
-        let pool = self.storage.pool();
-
         // Find RF2 SNAPSHOT files
         let concept_file = self.find_file(&temp_dir_path, "sct2_Concept_Snapshot").await?;
         let description_file = self
             .find_file(&temp_dir_path, "sct2_Description_Snapshot-en")
             .await?;
-        let relationship_file = self
-            .find_file(&temp_dir_path, "sct2_Relationship_Snapshot")
-            .await?;
 
         println!("Found concept file: {:?}", concept_file);
         println!("Found description file: {:?}", description_file);
-        println!("Found relationship file: {:?}", relationship_file);
 
         // Mark file location as complete
         self.emit_progress(ImportProgress {
@@ -190,10 +192,6 @@ impl<'a> TerminologyImporter<'a> {
         println!("Counting descriptions...");
         let description_total = Self::count_file_lines(&description_file)?;
         println!("Found {} descriptions to import", description_total);
-
-        println!("Counting relationships...");
-        let relationship_total = Self::count_file_lines(&relationship_file)?;
-        println!("Found {} relationships to import", relationship_total);
 
         // Import concepts with batch inserts
         println!("Importing concepts...");
@@ -230,10 +228,7 @@ impl<'a> TerminologyImporter<'a> {
                     message: format!("Imported {} concepts...", concept_count_tracker),
                 });
 
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(Self::insert_concept_batch(pool, self.version_id, batch))
-                })?;
+                self.insert_concept_batch(batch)?;
             }
 
             Ok(())
@@ -241,7 +236,7 @@ impl<'a> TerminologyImporter<'a> {
 
         // Insert remaining concepts
         if !concept_batch.is_empty() {
-            Self::insert_concept_batch(pool, self.version_id, concept_batch).await?;
+            self.insert_concept_batch(concept_batch)?;
         }
 
         println!("Imported {} concepts", concept_count);
@@ -292,11 +287,7 @@ impl<'a> TerminologyImporter<'a> {
                         message: format!("Imported {} descriptions...", description_count_tracker),
                     });
 
-                    tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(
-                            Self::insert_description_batch(pool, self.version_id, batch),
-                        )
-                    })?;
+                    self.insert_description_batch(batch)?;
                 }
 
                 Ok(())
@@ -304,7 +295,7 @@ impl<'a> TerminologyImporter<'a> {
 
         // Insert remaining descriptions
         if !description_batch.is_empty() {
-            Self::insert_description_batch(pool, self.version_id, description_batch).await?;
+            self.insert_description_batch(description_batch)?;
         }
 
         println!("Imported {} descriptions", description_count);
@@ -319,79 +310,38 @@ impl<'a> TerminologyImporter<'a> {
             message: format!("Imported {} descriptions", description_count),
         });
 
-        // Import relationships with batch inserts
-        println!("Importing relationships...");
-
+        // Build Tantivy index from imported data
         self.emit_progress(ImportProgress {
-            phase: "Importing Relationships".to_string(),
+            phase: "Building Search Index".to_string(),
             phase_status: "in_progress".to_string(),
             current: 0,
-            total: Some(relationship_total),
+            total: Some(description_count),
             percentage: 0.0,
-            message: "Importing SNOMED relationships...".to_string(),
+            message: "Building SNOMED search index...".to_string(),
         });
 
-        let mut relationship_batch = Vec::new();
-        let mut relationship_count_tracker = 0;
-        let relationship_file_handle = std::fs::File::open(&relationship_file)
-            .context("Failed to open relationships file")?;
-        let relationship_reader = BufReader::new(relationship_file_handle);
-        let relationship_count =
-            SnomedRf2Parser::parse_relationships(relationship_reader, |relationship| {
-                relationship_batch.push(relationship);
+        println!("Building Tantivy index for SNOMED...");
+        self.build_snomed_index(searcher)?;
 
-                // Batch insert every 1000 records
-                if relationship_batch.len() >= 1000 {
-                    let batch = std::mem::take(&mut relationship_batch);
-                    relationship_count_tracker += batch.len();
-
-                    // Emit progress every batch
-                    self.emit_progress(ImportProgress {
-                        phase: "Importing Relationships".to_string(),
-                        phase_status: "in_progress".to_string(),
-                        current: relationship_count_tracker,
-                        total: Some(relationship_total),
-                        percentage: (relationship_count_tracker as f32 / relationship_total as f32 * 100.0).min(100.0),
-                        message: format!("Imported {} relationships...", relationship_count_tracker),
-                    });
-
-                    tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(
-                            Self::insert_relationship_batch(pool, self.version_id, batch),
-                        )
-                    })?;
-                }
-
-                Ok(())
-            })?;
-
-        // Insert remaining relationships
-        if !relationship_batch.is_empty() {
-            Self::insert_relationship_batch(pool, self.version_id, relationship_batch).await?;
-        }
-
-        println!("Imported {} relationships", relationship_count);
-
-        // Mark relationships as complete
         self.emit_progress(ImportProgress {
-            phase: "Importing Relationships".to_string(),
+            phase: "Building Search Index".to_string(),
             phase_status: "completed".to_string(),
-            current: relationship_count,
-            total: Some(relationship_count),
+            current: description_count,
+            total: Some(description_count),
             percentage: 100.0,
-            message: format!("Imported {} relationships", relationship_count),
+            message: "Search index built".to_string(),
         });
 
         // Cleanup happens automatically when _temp_guard is dropped
         self.emit_progress(ImportProgress {
             phase: "Complete".to_string(),
             phase_status: "completed".to_string(),
-            current: concept_count + description_count + relationship_count,
-            total: Some(concept_count + description_count + relationship_count),
+            current: concept_count + description_count,
+            total: Some(concept_count + description_count),
             percentage: 100.0,
             message: format!(
-                "Import complete! {} concepts, {} descriptions, {} relationships",
-                concept_count, description_count, relationship_count
+                "Import complete! {} concepts, {} descriptions indexed",
+                concept_count, description_count
             ),
         });
 
@@ -400,7 +350,7 @@ impl<'a> TerminologyImporter<'a> {
     }
 
     /// Import AMT from CSV file
-    pub async fn import_amt(&self, csv_path: &Path) -> Result<()> {
+    pub async fn import_amt(&self, csv_path: &Path, searcher: &mut TerminologySearch) -> Result<()> {
         println!("Importing AMT from: {:?}", csv_path);
 
         // Pass 1: Count actual codes (not CSV lines)
@@ -439,8 +389,6 @@ impl<'a> TerminologyImporter<'a> {
             message: "Importing AMT codes...".to_string(),
         });
 
-        let pool = self.storage.pool();
-
         // Import AMT codes with batch inserts
         let mut batch = Vec::new();
         let mut count_tracker = 0;
@@ -462,10 +410,7 @@ impl<'a> TerminologyImporter<'a> {
                     message: format!("Imported {} AMT codes...", count_tracker),
                 });
 
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(Self::insert_amt_batch(pool, self.version_id, batch_to_insert))
-                })?;
+                self.insert_amt_batch(batch_to_insert)?;
             }
 
             Ok(())
@@ -473,7 +418,7 @@ impl<'a> TerminologyImporter<'a> {
 
         // Insert remaining codes
         if !batch.is_empty() {
-            Self::insert_amt_batch(pool, self.version_id, batch).await?;
+            self.insert_amt_batch(batch)?;
         }
 
         println!("Imported {} AMT codes", count);
@@ -486,6 +431,28 @@ impl<'a> TerminologyImporter<'a> {
             total: Some(count),
             percentage: 100.0,
             message: format!("Imported {} AMT codes", count),
+        });
+
+        // Build Tantivy index
+        self.emit_progress(ImportProgress {
+            phase: "Building Search Index".to_string(),
+            phase_status: "in_progress".to_string(),
+            current: 0,
+            total: Some(count),
+            percentage: 0.0,
+            message: "Building AMT search index...".to_string(),
+        });
+
+        println!("Building Tantivy index for AMT...");
+        self.build_amt_index(searcher)?;
+
+        self.emit_progress(ImportProgress {
+            phase: "Building Search Index".to_string(),
+            phase_status: "completed".to_string(),
+            current: count,
+            total: Some(count),
+            percentage: 100.0,
+            message: "Search index built".to_string(),
         });
 
         self.emit_progress(ImportProgress {
@@ -501,7 +468,7 @@ impl<'a> TerminologyImporter<'a> {
     }
 
     /// Import FHIR ValueSets from JSON bundle
-    pub async fn import_valuesets(&self, json_path: &Path) -> Result<()> {
+    pub async fn import_valuesets(&self, json_path: &Path, searcher: &mut TerminologySearch) -> Result<()> {
         println!("Importing ValueSets from: {:?}", json_path);
 
         self.emit_progress(ImportProgress {
@@ -513,9 +480,9 @@ impl<'a> TerminologyImporter<'a> {
             message: "Importing FHIR ValueSets...".to_string(),
         });
 
-        let pool = self.storage.pool();
-
         let mut count_tracker = 0;
+        let mut valueset_batch = Vec::new();
+
         let count = ValueSetR4Parser::parse_bundle(json_path, |valueset| {
             count_tracker += 1;
 
@@ -531,11 +498,21 @@ impl<'a> TerminologyImporter<'a> {
                 });
             }
 
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(Self::insert_valueset(pool, self.version_id, valueset))
-            })
+            valueset_batch.push(valueset);
+
+            // Batch insert every 50 valuesets
+            if valueset_batch.len() >= 50 {
+                let batch = std::mem::take(&mut valueset_batch);
+                self.insert_valueset_batch(batch)?;
+            }
+
+            Ok(())
         })?;
+
+        // Insert remaining valuesets
+        if !valueset_batch.is_empty() {
+            self.insert_valueset_batch(valueset_batch)?;
+        }
 
         println!("Imported {} ValueSets", count);
 
@@ -547,6 +524,28 @@ impl<'a> TerminologyImporter<'a> {
             total: Some(count),
             percentage: 100.0,
             message: format!("Imported {} ValueSets", count),
+        });
+
+        // Build Tantivy index
+        self.emit_progress(ImportProgress {
+            phase: "Building Search Index".to_string(),
+            phase_status: "in_progress".to_string(),
+            current: 0,
+            total: Some(count),
+            percentage: 0.0,
+            message: "Building ValueSet search index...".to_string(),
+        });
+
+        println!("Building Tantivy index for ValueSets...");
+        self.build_valueset_index(searcher)?;
+
+        self.emit_progress(ImportProgress {
+            phase: "Building Search Index".to_string(),
+            phase_status: "completed".to_string(),
+            current: count,
+            total: Some(count),
+            percentage: 100.0,
+            message: "Search index built".to_string(),
         });
 
         self.emit_progress(ImportProgress {
@@ -637,174 +636,236 @@ impl<'a> TerminologyImporter<'a> {
         Err(anyhow::anyhow!("File matching '{}' not found", pattern))
     }
 
-    /// Batch insert SNOMED concepts
-    async fn insert_concept_batch(
-        pool: &SqlitePool,
-        version_id: i64,
-        batch: Vec<crate::parsers::SnomedConcept>,
-    ) -> Result<()> {
-        for concept in batch {
-            sqlx::query(
-                r#"
-                INSERT OR IGNORE INTO snomed_concepts
-                    (id, effective_time, active, module_id, definition_status_id, version_id)
-                VALUES (?, ?, ?, ?, ?, ?)
-                "#,
-            )
-            .bind(&concept.id)
-            .bind(&concept.effective_time)
-            .bind(concept.active as i32)
-            .bind(&concept.module_id)
-            .bind(&concept.definition_status_id)
-            .bind(version_id)
-            .execute(pool)
-            .await?;
+    /// Batch insert SNOMED concepts into redb
+    fn insert_concept_batch(&self, batch: Vec<crate::parsers::SnomedConcept>) -> Result<()> {
+        let db = self.storage.database();
+        let write_txn = db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(SNOMED_CONCEPTS)?;
+
+            for concept in batch {
+                let storage_concept = SnomedConcept {
+                    id: concept.id.clone(),
+                    effective_time: concept.effective_time,
+                    active: concept.active,
+                    module_id: concept.module_id,
+                    definition_status_id: concept.definition_status_id,
+                    version_id: self.version_id,
+                };
+
+                let bytes = bincode::serialize(&storage_concept)?;
+                table.insert(concept.id.as_str(), bytes.as_slice())?;
+            }
         }
+        write_txn.commit()?;
 
         Ok(())
     }
 
-    /// Batch insert SNOMED descriptions
-    async fn insert_description_batch(
-        pool: &SqlitePool,
-        version_id: i64,
-        batch: Vec<crate::parsers::SnomedDescription>,
-    ) -> Result<()> {
-        for description in batch {
-            sqlx::query(
-                r#"
-                INSERT OR IGNORE INTO snomed_descriptions
-                    (id, effective_time, active, module_id, concept_id, language_code,
-                     type_id, term, case_significance_id, version_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                "#,
-            )
-            .bind(&description.id)
-            .bind(&description.effective_time)
-            .bind(description.active as i32)
-            .bind(&description.module_id)
-            .bind(&description.concept_id)
-            .bind(&description.language_code)
-            .bind(&description.type_id)
-            .bind(&description.term)
-            .bind(&description.case_significance_id)
-            .bind(version_id)
-            .execute(pool)
-            .await?;
+    /// Batch insert SNOMED descriptions into redb
+    fn insert_description_batch(&self, batch: Vec<crate::parsers::SnomedDescription>) -> Result<()> {
+        let db = self.storage.database();
+        let write_txn = db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(SNOMED_DESCRIPTIONS)?;
+
+            for description in batch {
+                let storage_description = SnomedDescription {
+                    id: description.id.clone(),
+                    effective_time: description.effective_time,
+                    active: description.active,
+                    module_id: description.module_id,
+                    concept_id: description.concept_id,
+                    language_code: description.language_code,
+                    type_id: description.type_id,
+                    term: description.term,
+                    case_significance_id: description.case_significance_id,
+                    version_id: self.version_id,
+                };
+
+                let bytes = bincode::serialize(&storage_description)?;
+                table.insert(description.id.as_str(), bytes.as_slice())?;
+            }
         }
+        write_txn.commit()?;
 
         Ok(())
     }
 
-    /// Batch insert SNOMED relationships
-    async fn insert_relationship_batch(
-        pool: &SqlitePool,
-        version_id: i64,
-        batch: Vec<crate::parsers::SnomedRelationship>,
-    ) -> Result<()> {
-        for relationship in batch {
-            sqlx::query(
-                r#"
-                INSERT OR IGNORE INTO snomed_relationships
-                    (id, effective_time, active, module_id, source_id, destination_id,
-                     relationship_group, type_id, characteristic_type_id, modifier_id, version_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                "#,
-            )
-            .bind(&relationship.id)
-            .bind(&relationship.effective_time)
-            .bind(relationship.active as i32)
-            .bind(&relationship.module_id)
-            .bind(&relationship.source_id)
-            .bind(&relationship.destination_id)
-            .bind(relationship.relationship_group)
-            .bind(&relationship.type_id)
-            .bind(&relationship.characteristic_type_id)
-            .bind(&relationship.modifier_id)
-            .bind(version_id)
-            .execute(pool)
-            .await?;
+    /// Batch insert AMT codes into redb
+    fn insert_amt_batch(&self, batch: Vec<crate::parsers::AmtCode>) -> Result<()> {
+        let db = self.storage.database();
+        let write_txn = db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(AMT_CODES)?;
+
+            for code in batch {
+                let storage_code = AmtCode {
+                    id: code.id.clone(),
+                    preferred_term: code.preferred_term,
+                    code_type: code.code_type,
+                    parent_code: code.parent_code,
+                    properties: code.properties,
+                    version_id: self.version_id,
+                };
+
+                let bytes = bincode::serialize(&storage_code)?;
+                table.insert(code.id.as_str(), bytes.as_slice())?;
+            }
         }
+        write_txn.commit()?;
 
         Ok(())
     }
 
-    /// Batch insert AMT codes
-    async fn insert_amt_batch(
-        pool: &SqlitePool,
-        version_id: i64,
-        batch: Vec<crate::parsers::AmtCode>,
-    ) -> Result<()> {
-        for code in batch {
-            sqlx::query(
-                r#"
-                INSERT OR IGNORE INTO amt_codes
-                    (id, preferred_term, code_type, parent_code, properties, version_id)
-                VALUES (?, ?, ?, ?, ?, ?)
-                "#,
-            )
-            .bind(&code.id)
-            .bind(&code.preferred_term)
-            .bind(&code.code_type)
-            .bind(&code.parent_code)
-            .bind(&code.properties)
-            .bind(version_id)
-            .execute(pool)
-            .await?;
-        }
+    /// Batch insert ValueSets and their concepts
+    fn insert_valueset_batch(&self, batch: Vec<crate::parsers::ValueSetEntry>) -> Result<()> {
+        let db = self.storage.database();
+        let write_txn = db.begin_write()?;
+        {
+            let mut vs_table = write_txn.open_table(VALUESETS)?;
+            let mut concept_table = write_txn.open_table(VALUESET_CONCEPTS)?;
 
-        Ok(())
-    }
+            for valueset in batch {
+                // Insert ValueSet metadata
+                let storage_valueset = ValueSet {
+                    url: valueset.url.clone(),
+                    version: valueset.version,
+                    name: valueset.name,
+                    title: valueset.title,
+                    status: valueset.status,
+                    description: valueset.description,
+                    publisher: valueset.publisher,
+                    version_id: self.version_id,
+                };
 
-    /// Insert ValueSet and its expansion
-    async fn insert_valueset(
-        pool: &SqlitePool,
-        version_id: i64,
-        valueset: crate::parsers::ValueSetEntry,
-    ) -> Result<()> {
-        // Insert ValueSet metadata
-        let result = sqlx::query(
-            r#"
-            INSERT OR IGNORE INTO valuesets
-                (url, version, name, title, status, description, publisher, version_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            RETURNING id
-            "#,
-        )
-        .bind(&valueset.url)
-        .bind(&valueset.version)
-        .bind(&valueset.name)
-        .bind(&valueset.title)
-        .bind(&valueset.status)
-        .bind(&valueset.description)
-        .bind(&valueset.publisher)
-        .bind(version_id)
-        .fetch_optional(pool)
-        .await?;
+                let vs_bytes = bincode::serialize(&storage_valueset)?;
+                vs_table.insert(storage_valueset.url.as_str(), vs_bytes.as_slice())?;
 
-        if let Some(row) = result {
-            use sqlx::Row;
-            let valueset_id: i64 = row.get(0);
+                // Insert expansion concepts if present
+                if let Some(expansion) = valueset.expansion {
+                    for concept in expansion {
+                        let storage_concept = ValueSetConcept {
+                            valueset_url: valueset.url.clone(),
+                            system: concept.system,
+                            code: concept.code.clone(),
+                            display: concept.display,
+                        };
 
-            // Insert expansion concepts if present
-            if let Some(expansion) = valueset.expansion {
-                for concept in expansion {
-                    sqlx::query(
-                        r#"
-                        INSERT OR IGNORE INTO valueset_concepts
-                            (valueset_id, system, code, display)
-                        VALUES (?, ?, ?, ?)
-                        "#,
-                    )
-                    .bind(valueset_id)
-                    .bind(&concept.system)
-                    .bind(&concept.code)
-                    .bind(&concept.display)
-                    .execute(pool)
-                    .await?;
+                        let concept_bytes = bincode::serialize(&storage_concept)?;
+                        concept_table.insert(
+                            (valueset.url.as_str(), storage_concept.code.as_str()),
+                            concept_bytes.as_slice(),
+                        )?;
+                    }
                 }
             }
         }
+        write_txn.commit()?;
+
+        Ok(())
+    }
+
+    /// Build Tantivy index for SNOMED descriptions
+    fn build_snomed_index(&self, searcher: &mut TerminologySearch) -> Result<()> {
+        println!("Building SNOMED Tantivy index...");
+
+        // Clear existing index
+        searcher.clear_snomed()?;
+
+        // Read all descriptions from redb and index them
+        let db = self.storage.database();
+        let read_txn = db.begin_read()?;
+        let table = read_txn.open_table(SNOMED_DESCRIPTIONS)?;
+
+        let mut indexed = 0;
+        for item in table.iter()? {
+            let (_, value) = item?;
+            let desc: SnomedDescription = bincode::deserialize(value.value())?;
+
+            searcher.index_snomed_description(
+                &desc.concept_id,
+                &desc.term,
+                &desc.type_id,
+                desc.active,
+            )?;
+
+            indexed += 1;
+            if indexed % 10000 == 0 {
+                println!("Indexed {} SNOMED descriptions...", indexed);
+            }
+        }
+
+        searcher.commit()?;
+        println!("SNOMED index built: {} descriptions indexed", indexed);
+
+        Ok(())
+    }
+
+    /// Build Tantivy index for AMT codes
+    fn build_amt_index(&self, searcher: &mut TerminologySearch) -> Result<()> {
+        println!("Building AMT Tantivy index...");
+
+        // Clear existing index
+        searcher.clear_amt()?;
+
+        // Read all AMT codes from redb and index them
+        let db = self.storage.database();
+        let read_txn = db.begin_read()?;
+        let table = read_txn.open_table(AMT_CODES)?;
+
+        let mut indexed = 0;
+        for item in table.iter()? {
+            let (_, value) = item?;
+            let code: AmtCode = bincode::deserialize(value.value())?;
+
+            searcher.index_amt_code(
+                &code.id,
+                &code.preferred_term,
+                &code.code_type,
+            )?;
+
+            indexed += 1;
+            if indexed % 1000 == 0 {
+                println!("Indexed {} AMT codes...", indexed);
+            }
+        }
+
+        searcher.commit()?;
+        println!("AMT index built: {} codes indexed", indexed);
+
+        Ok(())
+    }
+
+    /// Build Tantivy index for ValueSets
+    fn build_valueset_index(&self, searcher: &mut TerminologySearch) -> Result<()> {
+        println!("Building ValueSet Tantivy index...");
+
+        // Clear existing index
+        searcher.clear_valuesets()?;
+
+        // Read all ValueSets from redb and index them
+        let db = self.storage.database();
+        let read_txn = db.begin_read()?;
+        let table = read_txn.open_table(VALUESETS)?;
+
+        let mut indexed = 0;
+        for item in table.iter()? {
+            let (_, value) = item?;
+            let vs: ValueSet = bincode::deserialize(value.value())?;
+
+            searcher.index_valueset(
+                &vs.url,
+                vs.title.as_deref(),
+                vs.name.as_deref(),
+                vs.description.as_deref(),
+            )?;
+
+            indexed += 1;
+        }
+
+        searcher.commit()?;
+        println!("ValueSet index built: {} valuesets indexed", indexed);
 
         Ok(())
     }
