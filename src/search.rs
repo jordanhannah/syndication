@@ -2,10 +2,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::*;
 use tantivy::tokenizer::NgramTokenizer;
-use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy};
+use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, Term};
 
 /// Search result from Tantivy indexes
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,14 +87,24 @@ impl TerminologySearch {
         let mut schema_builder = Schema::builder();
 
         schema_builder.add_text_field("concept_id", STRING | STORED);
-        schema_builder.add_text_field("term", TEXT | STORED);
+
+        // Configure term field with trigram tokenizer for better fuzzy search
+        let text_field_indexing = TextFieldIndexing::default()
+            .set_tokenizer("trigram")
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+
+        let text_options = TextOptions::default()
+            .set_indexing_options(text_field_indexing)
+            .set_stored();
+
+        schema_builder.add_text_field("term", text_options);
         schema_builder.add_text_field("type_id", STRING);
         schema_builder.add_u64_field("active", INDEXED | STORED);
 
         let schema = schema_builder.build();
         let index = Index::open_or_create(tantivy::directory::MmapDirectory::open(index_dir)?, schema)?;
 
-        // Register trigram tokenizer for fuzzy matching
+        // Register trigram tokenizer BEFORE any indexing operations
         index.tokenizers().register(
             "trigram",
             NgramTokenizer::new(3, 3, false).unwrap(),
@@ -108,13 +118,23 @@ impl TerminologySearch {
         let mut schema_builder = Schema::builder();
 
         schema_builder.add_text_field("code", STRING | STORED);
-        schema_builder.add_text_field("preferred_term", TEXT | STORED);
-        schema_builder.add_text_field("code_type", STRING | STORED);
+
+        // Configure preferred_term field with trigram tokenizer for better fuzzy search
+        let text_field_indexing = TextFieldIndexing::default()
+            .set_tokenizer("trigram")
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+
+        let text_options = TextOptions::default()
+            .set_indexing_options(text_field_indexing)
+            .set_stored();
+
+        schema_builder.add_text_field("preferred_term", text_options);
+        schema_builder.add_text_field("code_type", STRING | STORED | FAST);
 
         let schema = schema_builder.build();
         let index = Index::open_or_create(tantivy::directory::MmapDirectory::open(index_dir)?, schema)?;
 
-        // Register trigram tokenizer
+        // Register trigram tokenizer BEFORE any indexing operations
         index.tokenizers().register(
             "trigram",
             NgramTokenizer::new(3, 3, false).unwrap(),
@@ -247,9 +267,8 @@ impl TerminologySearch {
         let searcher = self.snomed_reader.searcher();
         let query_parser = QueryParser::for_index(&self.snomed_index, vec![term_field]);
 
-        // Parse query with fuzzy matching
-        let query_str = format!("{}~1", query); // Allow 1 edit distance
-        let query = query_parser.parse_query(&query_str)?;
+        // Parse query (trigram tokenizer handles fuzzy matching naturally)
+        let query = query_parser.parse_query(query)?;
 
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
 
@@ -288,20 +307,51 @@ impl TerminologySearch {
         Ok(results)
     }
 
-    /// Search AMT codes
-    pub fn search_amt(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+    /// Search AMT codes with optional code type filtering
+    pub fn search_amt(&self, query: &str, limit: usize, code_types: Option<&[String]>) -> Result<Vec<SearchResult>> {
         let schema = self.amt_index.schema();
         let term_field = schema.get_field("preferred_term")?;
         let code_field = schema.get_field("code")?;
         let type_field = schema.get_field("code_type")?;
 
         let searcher = self.amt_reader.searcher();
+
+        // Build term query for preferred_term field
         let query_parser = QueryParser::for_index(&self.amt_index, vec![term_field]);
+        let term_query = query_parser.parse_query(query)?;
 
-        let query_str = format!("{}~1", query);
-        let query = query_parser.parse_query(&query_str)?;
+        // Build final query with optional code type filter
+        let final_query: Box<dyn tantivy::query::Query> = if let Some(types) = code_types {
+            if types.is_empty() {
+                Box::new(term_query)
+            } else {
+                // Build nested BooleanQuery structure:
+                // Top level: (term MUST match) AND (code_type filter MUST match)
+                // Nested level: (type1 SHOULD match) OR (type2 SHOULD match) OR ...
 
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
+                // Build the nested code_type filter (at least one type must match)
+                let type_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = types.iter()
+                    .map(|t| {
+                        let term = Term::from_field_text(type_field, t);
+                        (Occur::Should, Box::new(TermQuery::new(term, tantivy::schema::IndexRecordOption::Basic)) as Box<dyn tantivy::query::Query>)
+                    })
+                    .collect();
+
+                let type_filter = BooleanQuery::new(type_queries);
+
+                // Build top-level query: both clauses are MUST
+                let final_clauses = vec![
+                    (Occur::Must, Box::new(term_query) as Box<dyn tantivy::query::Query>),
+                    (Occur::Must, Box::new(type_filter) as Box<dyn tantivy::query::Query>),
+                ];
+
+                Box::new(BooleanQuery::new(final_clauses))
+            }
+        } else {
+            Box::new(term_query)
+        };
+
+        let top_docs = searcher.search(&*final_query, &TopDocs::with_limit(limit))?;
 
         let mut results = Vec::new();
         for (score, doc_address) in top_docs {
@@ -352,8 +402,7 @@ impl TerminologySearch {
             vec![title_field, name_field, desc_field, url_field],
         );
 
-        let query_str = format!("{}~1", query);
-        let query = query_parser.parse_query(&query_str)?;
+        let query = query_parser.parse_query(query)?;
 
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
 
@@ -393,7 +442,7 @@ impl TerminologySearch {
 
         let mut results = Vec::new();
         results.extend(self.search_snomed(query, per_terminology)?);
-        results.extend(self.search_amt(query, per_terminology)?);
+        results.extend(self.search_amt(query, per_terminology, None)?);
         results.extend(self.search_valuesets(query, per_terminology)?);
 
         // Sort by score descending

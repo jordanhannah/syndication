@@ -118,13 +118,14 @@ impl TerminologyQueries {
         searcher.search_snomed(query, limit)
     }
 
-    /// Search AMT codes using Tantivy
+    /// Search AMT codes using Tantivy with optional code type filtering
     pub fn search_amt(
         searcher: &TerminologySearch,
         query: &str,
         limit: usize,
+        code_types: Option<&[String]>,
     ) -> Result<Vec<SearchResult>> {
-        searcher.search_amt(query, limit)
+        searcher.search_amt(query, limit, code_types)
     }
 
     /// Search ValueSets using Tantivy

@@ -61,7 +61,8 @@ const TERMINOLOGY_VERSIONS: TableDefinition<u64, &[u8]> = TableDefinition::new("
 const TERMINOLOGY_VERSION_COUNTER: TableDefinition<&str, u64> = TableDefinition::new("version_counter");
 const SNOMED_CONCEPTS: TableDefinition<&str, &[u8]> = TableDefinition::new("snomed_concepts");
 const SNOMED_DESCRIPTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("snomed_descriptions");
-const AMT_CODES: TableDefinition<&str, &[u8]> = TableDefinition::new("amt_codes");
+// AMT_CODES uses composite key (SCTID, code_type) because same SCTID can appear in multiple product types
+const AMT_CODES: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("amt_codes");
 const VALUESETS: TableDefinition<&str, &[u8]> = TableDefinition::new("valuesets");
 const VALUESET_CONCEPTS: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("valueset_concepts");
 
@@ -521,23 +522,44 @@ impl TerminologyStorage {
         {
             let mut table = write_txn.open_table(AMT_CODES)?;
             let bytes = bincode::serialize(code)?;
-            table.insert(code.id.as_str(), bytes.as_slice())?;
+            // Use composite key (SCTID, code_type) to allow same SCTID across multiple product types
+            table.insert((code.id.as_str(), code.code_type.as_str()), bytes.as_slice())?;
         }
         write_txn.commit()?;
         Ok(())
     }
 
-    /// Get an AMT code by ID
+    /// Get an AMT code by ID (returns first match across all product types)
     pub fn get_amt_code(&self, id: &str) -> Result<Option<AmtCode>, StorageError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(AMT_CODES)?;
 
-        if let Some(value) = table.get(id)? {
-            let code: AmtCode = bincode::deserialize(value.value())?;
-            Ok(Some(code))
-        } else {
-            Ok(None)
+        // Since we use composite key (SCTID, code_type), find the first entry with matching SCTID
+        for item in table.iter()? {
+            let (key, value) = item?;
+            let (sctid, _code_type) = key.value();
+            if sctid == id {
+                let code: AmtCode = bincode::deserialize(value.value())?;
+                return Ok(Some(code));
+            }
         }
+
+        Ok(None)
+    }
+
+    /// Get all AMT codes (used for statistics/diagnostics)
+    pub fn get_all_amt_codes(&self) -> Result<Vec<AmtCode>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(AMT_CODES)?;
+
+        let mut codes = Vec::new();
+        for entry in table.iter()? {
+            let (_key, value) = entry?;
+            let code: AmtCode = bincode::deserialize(value.value())?;
+            codes.push(code);
+        }
+
+        Ok(codes)
     }
 
     /// Insert a ValueSet
@@ -742,12 +764,14 @@ impl TerminologyStorage {
                 let (key, value) = item?;
                 let code: AmtCode = bincode::deserialize(value.value())?;
                 if code.version_id == version_id {
-                    to_delete.push(key.value().to_string());
+                    // Store composite key (SCTID, code_type)
+                    let (sctid, code_type) = key.value();
+                    to_delete.push((sctid.to_string(), code_type.to_string()));
                 }
             }
 
-            for key in &to_delete {
-                table.remove(key.as_str())?;
+            for (sctid, code_type) in &to_delete {
+                table.remove((sctid.as_str(), code_type.as_str()))?;
                 deleted_count += 1;
             }
         }

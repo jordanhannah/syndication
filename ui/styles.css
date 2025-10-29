@@ -988,3 +988,167 @@ button:disabled {
 .modal-btn-confirm:hover {
     background: #c82333;
 }
+
+/* AMT Mode Selector Styles */
+.amt-mode-selector {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    padding: 10px 0;
+    border-top: 1px solid #ddd;
+    margin-top: 10px;
+}
+
+.mode-label {
+    font-weight: 600;
+    color: #333;
+}
+
+.radio-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    padding: 5px 10px;
+    border-radius: 4px;
+    transition: background 0.2s;
+}
+
+.radio-label:hover {
+    background: #f0f0f0;
+}
+
+.radio-label input[type="radio"] {
+    cursor: pointer;
+}
+
+.stats-btn {
+    background: #17a2b8;
+    padding: 8px 16px;
+    font-size: 14px;
+}
+
+.stats-btn:hover {
+    background: #138496;
+}
+
+/* AMT Stats Modal Styles */
+#amtStatsModal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+#amtStatsModal.hidden {
+    display: none;
+}
+
+#amtStatsModal .modal-content {
+    background: white;
+    border-radius: 8px;
+    padding: 0;
+    max-width: 900px;
+    width: 90%;
+    max-height: 80vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+#amtStatsModal .modal-header {
+    padding: 20px;
+    border-bottom: 1px solid #ddd;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+#amtStatsModal .modal-header h3 {
+    margin: 0;
+    color: #333;
+}
+
+#amtStatsModal .close-modal {
+    background: none;
+    border: none;
+    font-size: 24px;
+    cursor: pointer;
+    color: #666;
+    padding: 0;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#amtStatsModal .close-modal:hover {
+    color: #333;
+    background: #f0f0f0;
+    border-radius: 4px;
+}
+
+#amtStatsModal .modal-body {
+    padding: 20px;
+    overflow-y: auto;
+}
+
+.stats-total {
+    font-size: 18px;
+    margin-bottom: 20px;
+    padding: 15px;
+    background: #f8f9fa;
+    border-radius: 6px;
+    text-align: center;
+}
+
+.stats-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 20px;
+}
+
+.stats-table thead {
+    background: #f8f9fa;
+}
+
+.stats-table th,
+.stats-table td {
+    padding: 12px;
+    text-align: left;
+    border-bottom: 1px solid #ddd;
+}
+
+.stats-table th {
+    font-weight: 600;
+    color: #333;
+}
+
+.stats-table .description {
+    color: #666;
+    font-size: 14px;
+}
+
+.stats-table .patient-code-row {
+    background: #e3f2fd;
+}
+
+.stats-table .patient-code-row:hover {
+    background: #bbdefb;
+}
+
+.stats-note {
+    font-size: 14px;
+    color: #666;
+    text-align: center;
+    padding: 10px;
+    background: #e3f2fd;
+    border-radius: 4px;
+}

@@ -44,7 +44,8 @@ pub struct ImportProgress {
 // Redb table definitions for batch operations
 const SNOMED_CONCEPTS: TableDefinition<&str, &[u8]> = TableDefinition::new("snomed_concepts");
 const SNOMED_DESCRIPTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("snomed_descriptions");
-const AMT_CODES: TableDefinition<&str, &[u8]> = TableDefinition::new("amt_codes");
+// AMT_CODES uses composite key (SCTID, code_type) because same SCTID can appear in multiple product types
+const AMT_CODES: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("amt_codes");
 const VALUESETS: TableDefinition<&str, &[u8]> = TableDefinition::new("valuesets");
 const VALUESET_CONCEPTS: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("valueset_concepts");
 
@@ -703,14 +704,15 @@ impl<'a> TerminologyImporter<'a> {
                 let storage_code = AmtCode {
                     id: code.id.clone(),
                     preferred_term: code.preferred_term,
-                    code_type: code.code_type,
+                    code_type: code.code_type.clone(),
                     parent_code: code.parent_code,
                     properties: code.properties,
                     version_id: self.version_id,
                 };
 
                 let bytes = bincode::serialize(&storage_code)?;
-                table.insert(code.id.as_str(), bytes.as_slice())?;
+                // Use composite key (SCTID, code_type) to allow same SCTID across multiple product types
+                table.insert((code.id.as_str(), code.code_type.as_str()), bytes.as_slice())?;
             }
         }
         write_txn.commit()?;

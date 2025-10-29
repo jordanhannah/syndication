@@ -13,11 +13,13 @@ fn main() {
 
 use auth::TokenManager;
 use commands::{
-    cleanup_ghost_versions, delete_all_terminology_data, delete_terminology_data,
-    delete_terminology_file, expand_valueset, fetch_all_versions, fetch_latest_version,
-    get_all_local_latest, get_detailed_storage_info, get_local_latest, get_local_versions,
-    import_terminology, list_valuesets, lookup_code, search_terminology,
-    sync_all_terminologies, sync_terminology, test_connection, validate_code, AppState,
+    cleanup_ghost_versions, debug_amt_codes, diagnose_amt_index, delete_all_terminology_data,
+    delete_terminology_data, delete_terminology_file, expand_valueset, fetch_all_versions,
+    fetch_latest_version, get_all_local_latest, get_amt_code_type_stats,
+    get_detailed_storage_info, get_local_latest, get_local_versions, import_terminology,
+    list_valuesets, lookup_code, rebuild_amt_index, search_amt_doctor, search_amt_patient,
+    search_terminology, sync_all_terminologies, sync_terminology, test_connection, validate_code,
+    AppState,
 }; // Note: get_storage_stats temporarily disabled during redb migration
 use directories::ProjectDirs;
 use import::TerminologyImporter;
@@ -92,6 +94,12 @@ pub fn run() {
             get_all_local_latest,
             import_terminology,
             search_terminology,
+            search_amt_patient,
+            search_amt_doctor,
+            get_amt_code_type_stats,
+            debug_amt_codes,
+            rebuild_amt_index,
+            diagnose_amt_index,
             lookup_code,
             expand_valueset,
             validate_code,

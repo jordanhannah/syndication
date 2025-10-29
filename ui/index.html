@@ -29,7 +29,30 @@
                     <label><input type="checkbox" value="valuesets" checked> ValueSets</label>
                     <label><input type="checkbox" value="all"> All</label>
                 </div>
+                <div class="amt-mode-selector">
+                    <label class="mode-label">AMT Search Mode:</label>
+                    <label class="radio-label">
+                        <input type="radio" name="amtMode" value="patient" checked>
+                        Patient (MP/TP only)
+                    </label>
+                    <label class="radio-label">
+                        <input type="radio" name="amtMode" value="doctor">
+                        Doctor (All codes)
+                    </label>
+                    <button id="showAmtStatsBtn" class="stats-btn" title="Show AMT code type statistics">📊 Stats</button>
+                </div>
                 <button id="searchBtn">Search</button>
+            </div>
+            <div id="amtStatsModal" class="modal hidden">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>AMT Code Type Statistics</h3>
+                        <button class="close-modal">&times;</button>
+                    </div>
+                    <div id="amtStatsContent" class="modal-body">
+                        Loading...
+                    </div>
+                </div>
             </div>
             <div id="searchResults" class="search-results hidden">
                 <h3>Results</h3>
@@ -425,14 +448,43 @@
                 return;
             }
 
-            log(`Searching for "${query}" in ${terminologyTypes.join(', ')}...`);
+            // Check if AMT is selected and use appropriate search mode
+            const amtMode = document.querySelector('input[name="amtMode"]:checked')?.value || 'patient';
+            const isAmtOnly = terminologyTypes.length === 1 && terminologyTypes[0] === 'amt';
+
+            log(`Searching for "${query}" in ${terminologyTypes.join(', ')}... (AMT mode: ${amtMode})`);
 
             try {
-                const results = await invoke('search_terminology', {
-                    query,
-                    terminologyTypes,
-                    limit: 50
-                });
+                let results;
+
+                // Use specialized AMT search if only AMT is selected
+                if (isAmtOnly) {
+                    if (amtMode === 'patient') {
+                        results = await invoke('search_amt_patient', {
+                            query,
+                            limit: 50
+                        });
+                        log(`✓ Found ${results.length} results (Patient mode: MP/TP codes only)`);
+                    } else {
+                        results = await invoke('search_amt_doctor', {
+                            query,
+                            limit: 50
+                        });
+                        log(`✓ Found ${results.length} results (Doctor mode: all code types)`);
+                    }
+                } else {
+                    // Use general search for mixed terminologies
+                    results = await invoke('search_terminology', {
+                        query,
+                        terminologyTypes,
+                        limit: 50
+                    });
+
+                    // Note: General search doesn't apply AMT filtering yet
+                    if (terminologyTypes.includes('amt')) {
+                        log(`Note: AMT mode (${amtMode}) only applies when searching AMT exclusively`);
+                    }
+                }
 
                 displaySearchResults(results);
             } catch (error) {
@@ -1198,6 +1250,61 @@
             }
         }
 
+        async function showAmtStats() {
+            const modal = document.getElementById('amtStatsModal');
+            const content = document.getElementById('amtStatsContent');
+
+            modal.classList.remove('hidden');
+            content.innerHTML = '<p>Loading AMT code type statistics...</p>';
+
+            try {
+                const stats = await invoke('get_amt_code_type_stats');
+
+                if (stats.length === 0) {
+                    content.innerHTML = '<p class="no-results">No AMT codes found. Please import AMT terminology first.</p>';
+                    return;
+                }
+
+                const totalCodes = stats.reduce((sum, stat) => sum + stat.count, 0);
+
+                let html = `<p class="stats-total">Total AMT Codes: <strong>${totalCodes.toLocaleString()}</strong></p>`;
+                html += '<table class="stats-table">';
+                html += '<thead><tr><th>Code Type</th><th>Count</th><th>Percentage</th><th>Description</th></tr></thead>';
+                html += '<tbody>';
+
+                const descriptions = {
+                    'CTPP': 'Containered Trade Product Pack (e.g., Panadol 500mg tablet, blister pack, 20)',
+                    'TPP': 'Trade Product Pack (e.g., Panadol 500mg tablet, 20)',
+                    'TPUU': 'Trade Product Unit of Use (e.g., Panadol 500mg tablet)',
+                    'TP': 'Trade Product (e.g., Panadol)',
+                    'MPP': 'Medicinal Product Pack (e.g., Paracetamol 500mg tablet, 20)',
+                    'MPUU': 'Medicinal Product Unit of Use (e.g., Paracetamol 500mg tablet)',
+                    'MP': 'Medicinal Product (e.g., Paracetamol)',
+                };
+
+                stats.forEach(stat => {
+                    const percentage = ((stat.count / totalCodes) * 100).toFixed(1);
+                    const isPatientCode = stat.code_type === 'MP' || stat.code_type === 'TP';
+                    const rowClass = isPatientCode ? 'patient-code-row' : '';
+                    html += `<tr class="${rowClass}">
+                        <td><strong>${stat.code_type}</strong>${isPatientCode ? ' 🔹' : ''}</td>
+                        <td>${stat.count.toLocaleString()}</td>
+                        <td>${percentage}%</td>
+                        <td class="description">${descriptions[stat.code_type] || ''}</td>
+                    </tr>`;
+                });
+
+                html += '</tbody></table>';
+                html += '<p class="stats-note">🔹 = Available in Patient search mode</p>';
+
+                content.innerHTML = html;
+                log('✓ AMT code type statistics loaded');
+            } catch (error) {
+                content.innerHTML = `<p class="error-message">Failed to load statistics: ${error}</p>`;
+                log(`✗ Failed to load AMT stats: ${error}`, 'error');
+            }
+        }
+
         // Initialize on load
         document.addEventListener('DOMContentLoaded', async () => {
             log('Application started');
@@ -1208,6 +1315,12 @@
             document.getElementById('refreshStatus').addEventListener('click', refreshStatus);
             document.getElementById('cleanupGhosts').addEventListener('click', cleanupGhostVersions);
             document.getElementById('searchBtn').addEventListener('click', searchTerminology);
+
+            // AMT stats button event listener
+            document.getElementById('showAmtStatsBtn').addEventListener('click', showAmtStats);
+            document.querySelector('#amtStatsModal .close-modal').addEventListener('click', () => {
+                document.getElementById('amtStatsModal').classList.add('hidden');
+            });
 
             // ValueSet browser event listeners
             document.getElementById('loadValueSetsBtn').addEventListener('click', loadValueSets);

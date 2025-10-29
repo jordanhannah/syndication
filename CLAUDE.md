@@ -93,8 +93,8 @@ Your New Architecture Should Be:
 
 // Tantivy index schema (in-memory at runtime)
 
-1. AMT Medications Patient Index (MP, TP only)
-2. AMT Medications Doctor Index (MP, TP, MPUU, TPUU)
+1. AMT Medications Patient Index (MP PT, TPP TP PT)
+2. AMT Medications Doctor Index (MP PT, MPUU PT, TPP TP PT, TPUU PT)
 3. SNOMED Problem/Diagnosis Refset (filtered by 32570571000036108)
 4. SNOMED All Terms + LOINC
 

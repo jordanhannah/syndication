@@ -378,7 +378,7 @@ pub async fn search_terminology(
                 }
                 "amt" => {
                     let amt_results =
-                        TerminologyQueries::search_amt(&searcher, &query, limit)
+                        TerminologyQueries::search_amt(&searcher, &query, limit, None)
                             .map_err(|e| format!("AMT search failed: {}", e))?;
                     results.extend(amt_results);
                 }
@@ -394,6 +394,240 @@ pub async fn search_terminology(
 
         Ok(results)
     }
+}
+
+/// Search AMT codes for patient use (MP PT and TPP TP PT columns only)
+/// Returns Medicinal Product (MP) and Trade Product Pack (TPP TP) terms for patient-facing searches
+#[tauri::command]
+pub async fn search_amt_patient(
+    query: String,
+    limit: Option<i32>,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::search::SearchResult>, String> {
+    let searcher = state.searcher.lock().await;
+    let limit = limit.unwrap_or(20) as usize;
+
+    // Filter to MP (Medicinal Product) and TPP TP (Trade Product Pack - TP) only
+    // Indexes the MP PT and TPP TP PT columns from AMT CSV
+    let code_types = vec!["MP".to_string(), "TPP TP".to_string()];
+
+    TerminologyQueries::search_amt(&searcher, &query, limit, Some(&code_types))
+        .map_err(|e| format!("AMT patient search failed: {}", e))
+}
+
+/// Search AMT codes for doctor use (MP PT, MPUU PT, TPP TP PT, TPUU PT columns)
+/// Returns Medicinal Product, Medicinal Product Unit of Use, Trade Product Pack, and Trade Product Unit of Use terms
+/// Filters to: MP, MPUU, TPP TP, TPUU TP (4 types as per CLAUDE.md spec)
+#[tauri::command]
+pub async fn search_amt_doctor(
+    query: String,
+    limit: Option<i32>,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::search::SearchResult>, String> {
+    let searcher = state.searcher.lock().await;
+    let limit = limit.unwrap_or(20) as usize;
+
+    // Filter to doctor-relevant types: MP, MPUU, TPP TP, TPUU TP
+    let code_types = vec![
+        "MP".to_string(),
+        "MPUU".to_string(),
+        "TPP TP".to_string(),
+        "TPUU TP".to_string()
+    ];
+    TerminologyQueries::search_amt(&searcher, &query, limit, Some(&code_types))
+        .map_err(|e| format!("AMT doctor search failed: {}", e))
+}
+
+/// Get AMT code type statistics for diagnostics
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AmtCodeTypeStats {
+    pub code_type: String,
+    pub count: usize,
+}
+
+#[tauri::command]
+pub async fn get_amt_code_type_stats(
+    state: State<'_, AppState>,
+) -> Result<Vec<AmtCodeTypeStats>, String> {
+    let storage = state.storage.lock().await;
+
+    // Get all AMT codes
+    let all_codes = storage
+        .get_all_amt_codes()
+        .map_err(|e| format!("Failed to get AMT codes: {}", e))?;
+
+    // Count by code type
+    let mut type_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for code in all_codes {
+        *type_counts.entry(code.code_type.clone()).or_insert(0) += 1;
+    }
+
+    // Convert to sorted vector
+    let mut stats: Vec<AmtCodeTypeStats> = type_counts
+        .into_iter()
+        .map(|(code_type, count)| AmtCodeTypeStats { code_type, count })
+        .collect();
+
+    // Sort by count descending
+    stats.sort_by(|a, b| b.count.cmp(&a.count));
+
+    Ok(stats)
+}
+
+/// Debug command: Get all AMT codes matching a drug name, grouped by product type
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AmtCodeVariant {
+    pub code: String,
+    pub preferred_term: String,
+    pub code_type: String,
+}
+
+#[tauri::command]
+pub async fn debug_amt_codes(
+    drug_name: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<AmtCodeVariant>, String> {
+    let storage = state.storage.lock().await;
+
+    // Get all AMT codes
+    let all_codes = storage
+        .get_all_amt_codes()
+        .map_err(|e| format!("Failed to get AMT codes: {}", e))?;
+
+    // Filter by drug name (case-insensitive)
+    let drug_name_lower = drug_name.to_lowercase();
+    let mut matching_codes: Vec<AmtCodeVariant> = all_codes
+        .into_iter()
+        .filter(|code| code.preferred_term.to_lowercase().contains(&drug_name_lower))
+        .map(|code| AmtCodeVariant {
+            code: code.id,
+            preferred_term: code.preferred_term,
+            code_type: code.code_type,
+        })
+        .collect();
+
+    // Sort by code type, then by preferred term
+    matching_codes.sort_by(|a, b| {
+        a.code_type.cmp(&b.code_type)
+            .then_with(|| a.preferred_term.cmp(&b.preferred_term))
+    });
+
+    Ok(matching_codes)
+}
+
+/// Rebuild the AMT Tantivy index from redb storage
+/// Use this to force a complete reindex if search isn't working
+#[tauri::command]
+pub async fn rebuild_amt_index(
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let storage = state.storage.lock().await;
+    let mut searcher = state.searcher.lock().await;
+
+    println!("Rebuilding AMT Tantivy index from redb storage...");
+
+    // Clear existing index
+    searcher.clear_amt()
+        .map_err(|e| format!("Failed to clear AMT index: {}", e))?;
+
+    // Read all AMT codes from redb and re-index them
+    let all_codes = storage
+        .get_all_amt_codes()
+        .map_err(|e| format!("Failed to read AMT codes: {}", e))?;
+
+    let total = all_codes.len();
+    let mut indexed = 0;
+    let mut type_counts = std::collections::HashMap::new();
+
+    for code in all_codes {
+        searcher.index_amt_code(&code.id, &code.preferred_term, &code.code_type)
+            .map_err(|e| format!("Failed to index code {}: {}", code.id, e))?;
+
+        *type_counts.entry(code.code_type.clone()).or_insert(0) += 1;
+        indexed += 1;
+
+        if indexed % 1000 == 0 {
+            println!("Indexed {} / {} AMT codes...", indexed, total);
+        }
+    }
+
+    // Commit the index
+    searcher.commit()
+        .map_err(|e| format!("Failed to commit AMT index: {}", e))?;
+
+    println!("AMT index rebuild complete: {} codes indexed", indexed);
+
+    // Build breakdown message
+    let mut breakdown: Vec<_> = type_counts.iter().collect();
+    breakdown.sort_by(|a, b| b.1.cmp(a.1));
+    let breakdown_str = breakdown.iter()
+        .map(|(k, v)| format!("  {}: {} codes", k, v))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(format!(
+        "Successfully rebuilt AMT index: {} total codes indexed\n\nBreakdown by type:\n{}",
+        indexed, breakdown_str
+    ))
+}
+
+/// Diagnose AMT index health - compares storage vs index
+#[tauri::command]
+pub async fn diagnose_amt_index(
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let storage = state.storage.lock().await;
+    let searcher = state.searcher.lock().await;
+
+    // Check redb storage
+    let all_codes = storage
+        .get_all_amt_codes()
+        .map_err(|e| format!("Failed to read AMT codes: {}", e))?;
+
+    let mut type_counts = std::collections::HashMap::new();
+    for code in &all_codes {
+        *type_counts.entry(code.code_type.clone()).or_insert(0) += 1;
+    }
+
+    let mut storage_breakdown: Vec<_> = type_counts.iter().collect();
+    storage_breakdown.sort_by(|a, b| b.1.cmp(a.1));
+    let storage_summary = format!(
+        "Storage (redb): {} total codes\n{}",
+        all_codes.len(),
+        storage_breakdown.iter()
+            .map(|(k, v)| format!("  {}: {}", k, v))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    // Test searches
+    let test_queries = vec![
+        ("rivaroxaban", None),
+        ("rivaroxaban", Some(vec!["MP".to_string()])),
+        ("rivaroxaban", Some(vec!["MP".to_string(), "MPUU".to_string()])),
+        ("xarelto", None),
+        ("xarelto", Some(vec!["TPP TP".to_string()])),
+    ];
+
+    let mut search_results = Vec::new();
+    for (query, filter) in test_queries {
+        let filter_ref = filter.as_ref().map(|v| v.as_slice());
+        let results = searcher.search_amt(query, 10, filter_ref)
+            .map_err(|e| format!("Search failed for '{}': {}", query, e))?;
+
+        let filter_str = match filter {
+            Some(ref f) => format!(" [filter: {}]", f.join(", ")),
+            None => " [no filter]".to_string(),
+        };
+        search_results.push(format!("  '{}'{}: {} results", query, filter_str, results.len()));
+    }
+
+    let search_summary = format!(
+        "Search Tests:\n{}",
+        search_results.join("\n")
+    );
+
+    Ok(format!("{}\n\n{}", storage_summary, search_summary))
 }
 
 /// Look up a specific code with synonyms

@@ -38,7 +38,9 @@ impl AmtCsvParser {
 
     /// Parse AMT codes from a CSV file
     /// CSV format is wide-format with multiple product types:
-    /// CTPP SCTID, CTPP PT, ARTG_ID, TPP SCTID, TPP PT, TPUU SCTID, TPUU PT, etc.
+    /// CTPP SCTID, CTPP PT, ARTG_ID, TPP SCTID, TPP PT, TPUU SCTID, TPUU PT,
+    /// TPP TP SCTID, TPP TP PT, TPUU TP SCTID, TPUU TP PT, MPP SCTID, MPP PT,
+    /// MPUU SCTID, MPUU PT, MP SCTID, MP PT
     /// Each row is expanded into multiple AmtCode entries (one per product type)
     pub fn parse<P: AsRef<Path>, F>(path: P, mut callback: F) -> Result<usize>
     where
@@ -70,15 +72,16 @@ impl AmtCsvParser {
         }
 
         // Define product type hierarchy (child -> parent)
-        // CTPP -> TPP -> TPUU -> TPP TP -> TPUU TP -> MPP -> MPUU -> MP
+        // Hierarchy flows right to left in CSV: MP (root) <- MPUU <- MPP <- TPUU TP <- TPP TP <- TPUU <- TPP <- CTPP (leaf)
+        // Each product type's parent is the next more generic level
         let hierarchy = vec![
-            ("CTPP", "TPP"),
-            ("TPP", "TPUU"),
-            ("TPUU", "TPP TP"),
-            ("TPP TP", "TPUU TP"),
-            ("TPUU TP", "MPP"),
-            ("MPP", "MPUU"),
-            ("MPUU", "MP"),
+            ("CTPP", "TPP"),           // Containered Trade Product Pack -> Trade Product Pack
+            ("TPP", "TPUU"),           // Trade Product Pack -> Trade Product Unit of Use
+            ("TPUU", "TPP TP"),        // Trade Product Unit of Use -> Trade Product (TP)
+            ("TPP TP", "TPUU TP"),     // Trade Product (TP) -> Trade Product Unit of Use (TP)
+            ("TPUU TP", "MPP"),        // Trade Product Unit of Use (TP) -> Medicinal Product Pack
+            ("MPP", "MPUU"),           // Medicinal Product Pack -> Medicinal Product Unit of Use
+            ("MPUU", "MP"),            // Medicinal Product Unit of Use -> Medicinal Product (root)
         ];
 
         let mut count = 0;
@@ -264,22 +267,60 @@ mod tests {
     }
 
     #[test]
+    fn test_find_column_pairs_with_spaces() {
+        // Test the real AMT CSV header with all 17 columns including "TPP TP" and "TPUU TP"
+        let headers = vec![
+            "CTPP SCTID", "CTPP PT", "ARTG_ID",
+            "TPP SCTID", "TPP PT",
+            "TPUU SCTID", "TPUU PT",
+            "TPP TP SCTID", "TPP TP PT",
+            "TPUU TP SCTID", "TPUU TP PT",
+            "MPP SCTID", "MPP PT",
+            "MPUU SCTID", "MPUU PT",
+            "MP SCTID", "MP PT",
+        ];
+
+        let pairs = AmtCsvParser::find_column_pairs(&headers).unwrap();
+
+        // Should find all 8 product types
+        assert_eq!(pairs.len(), 8, "Should find 8 SCTID/PT pairs");
+
+        // Verify TPP TP (with space) is detected
+        let tpp_tp = pairs.iter().find(|p| p.product_type == "TPP TP");
+        assert!(tpp_tp.is_some(), "TPP TP should be detected");
+        assert_eq!(tpp_tp.unwrap().sctid_idx, 7);
+        assert_eq!(tpp_tp.unwrap().pt_idx, 8);
+
+        // Verify TPUU TP (with space) is detected
+        let tpuu_tp = pairs.iter().find(|p| p.product_type == "TPUU TP");
+        assert!(tpuu_tp.is_some(), "TPUU TP should be detected");
+        assert_eq!(tpuu_tp.unwrap().sctid_idx, 9);
+        assert_eq!(tpuu_tp.unwrap().pt_idx, 10);
+
+        // Verify MP is still detected
+        let mp = pairs.iter().find(|p| p.product_type == "MP");
+        assert!(mp.is_some(), "MP should be detected");
+        assert_eq!(mp.unwrap().sctid_idx, 15);
+        assert_eq!(mp.unwrap().pt_idx, 16);
+    }
+
+    #[test]
     fn test_parse_amt_real_format() {
         // Create a temporary test file with real AMT format
         use std::io::Write;
         let mut temp_file = tempfile::NamedTempFile::new().unwrap();
 
-        // Write header
+        // Write header with all 17 columns
         writeln!(
             temp_file,
-            "CTPP SCTID,CTPP PT,ARTG_ID,TPP SCTID,TPP PT,MPP SCTID,MPP PT,MP SCTID,MP PT"
+            "CTPP SCTID,CTPP PT,ARTG_ID,TPP SCTID,TPP PT,TPUU SCTID,TPUU PT,TPP TP SCTID,TPP TP PT,TPUU TP SCTID,TPUU TP PT,MPP SCTID,MPP PT,MPUU SCTID,MPUU PT,MP SCTID,MP PT"
         )
         .unwrap();
 
-        // Write test data row
+        // Write test data row with all product types (from user's sample data)
         writeln!(
             temp_file,
-            r#"1664881000168108,"Olsetan 40 mg tablet, 30, blister pack",358594,1664871000168105,"Olsetan 40 mg tablet, 30",26567011000036100,"Olmesartan medoxomil 40 mg tablet, 30",385540001,"Olmesartan""#
+            r#"1664881000168108,"Olsetan 40 mg tablet, 30, blister pack",358594,1664871000168105,"Olsetan 40 mg tablet, 30",1664861000168104,"Olsetan 40 mg tablet",1664821000168109,"Olsetan",1664821000168109,"Olsetan",26567011000036100,"Olmesartan medoxomil 40 mg tablet, 30",21976011000036100,"Olmesartan medoxomil 40 mg tablet",385540001,"Olmesartan""#
         )
         .unwrap();
 
@@ -293,11 +334,11 @@ mod tests {
         })
         .unwrap();
 
-        // Should have 4 codes (CTPP, TPP, MPP, MP)
-        assert_eq!(count, 4);
-        assert_eq!(codes.len(), 4);
+        // Should have 8 codes (CTPP, TPP, TPUU, TPP TP, TPUU TP, MPP, MPUU, MP)
+        assert_eq!(count, 8);
+        assert_eq!(codes.len(), 8);
 
-        // Check CTPP
+        // Check CTPP (Containered Trade Product Pack)
         let ctpp = codes.iter().find(|c| c.code_type == "CTPP").unwrap();
         assert_eq!(ctpp.id, "1664881000168108");
         assert_eq!(ctpp.preferred_term, "Olsetan 40 mg tablet, 30, blister pack");
@@ -305,21 +346,46 @@ mod tests {
         assert!(ctpp.properties.is_some());
         assert!(ctpp.properties.as_ref().unwrap().contains("358594"));
 
-        // Check TPP
+        // Check TPP (Trade Product Pack)
         let tpp = codes.iter().find(|c| c.code_type == "TPP").unwrap();
         assert_eq!(tpp.id, "1664871000168105");
         assert_eq!(tpp.preferred_term, "Olsetan 40 mg tablet, 30");
-        assert_eq!(tpp.parent_code, None); // No TPUU in this test data
+        assert_eq!(tpp.parent_code, Some("1664861000168104".to_string())); // TPUU
 
-        // Check MPP
+        // Check TPUU (Trade Product Unit of Use)
+        let tpuu = codes.iter().find(|c| c.code_type == "TPUU").unwrap();
+        assert_eq!(tpuu.id, "1664861000168104");
+        assert_eq!(tpuu.preferred_term, "Olsetan 40 mg tablet");
+        assert_eq!(tpuu.parent_code, Some("1664821000168109".to_string())); // TPP TP
+
+        // Check TPP TP (Trade Product - TP)
+        let tpp_tp = codes.iter().find(|c| c.code_type == "TPP TP").unwrap();
+        assert_eq!(tpp_tp.id, "1664821000168109");
+        assert_eq!(tpp_tp.preferred_term, "Olsetan");
+        assert_eq!(tpp_tp.parent_code, Some("1664821000168109".to_string())); // TPUU TP
+
+        // Check TPUU TP (Trade Product Unit of Use - TP)
+        let tpuu_tp = codes.iter().find(|c| c.code_type == "TPUU TP").unwrap();
+        assert_eq!(tpuu_tp.id, "1664821000168109");
+        assert_eq!(tpuu_tp.preferred_term, "Olsetan");
+        assert_eq!(tpuu_tp.parent_code, Some("26567011000036100".to_string())); // MPP
+
+        // Check MPP (Medicinal Product Pack)
         let mpp = codes.iter().find(|c| c.code_type == "MPP").unwrap();
         assert_eq!(mpp.id, "26567011000036100");
         assert_eq!(mpp.preferred_term, "Olmesartan medoxomil 40 mg tablet, 30");
+        assert_eq!(mpp.parent_code, Some("21976011000036100".to_string())); // MPUU
 
-        // Check MP
+        // Check MPUU (Medicinal Product Unit of Use)
+        let mpuu = codes.iter().find(|c| c.code_type == "MPUU").unwrap();
+        assert_eq!(mpuu.id, "21976011000036100");
+        assert_eq!(mpuu.preferred_term, "Olmesartan medoxomil 40 mg tablet");
+        assert_eq!(mpuu.parent_code, Some("385540001".to_string())); // MP
+
+        // Check MP (Medicinal Product - root)
         let mp = codes.iter().find(|c| c.code_type == "MP").unwrap();
         assert_eq!(mp.id, "385540001");
         assert_eq!(mp.preferred_term, "Olmesartan");
-        assert_eq!(mp.parent_code, None); // MP is top-level
+        assert_eq!(mp.parent_code, None); // MP is top-level (root parent)
     }
 }
