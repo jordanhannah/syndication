@@ -56,3 +56,6 @@ MP, MPUU, TPUU TP, TPUU
 
 Patient's index:
 MP, TPUU TP
+
+\*i never want the following if the include an exact match for MP:
+TPP TP, TPUU TP, TPP, TPUU

@@ -804,8 +804,101 @@ impl<'a> TerminologyImporter<'a> {
         Ok(())
     }
 
-    /// Build Tantivy index for AMT codes
-    fn build_amt_index(&self, searcher: &mut TerminologySearch) -> Result<()> {
+    /// Check if a trade product entry should be skipped from indexing
+    /// Returns true if the entry is a TPP TP/TPUU TP/TPP/TPUU that just adds a brand name to the MP term
+    fn should_skip_duplicate_trade_product<'txn>(
+        code: &AmtCode,
+        table: &'txn impl ReadableTable<(&'static str, &'static str), &'static [u8]>,
+    ) -> Result<bool> {
+        // Only filter these four trade product types
+        if code.code_type != "TPP TP"
+            && code.code_type != "TPUU TP"
+            && code.code_type != "TPP"
+            && code.code_type != "TPUU"
+        {
+            return Ok(false);
+        }
+
+        // Must contain parentheses (brand name pattern)
+        if !code.preferred_term.contains('(') || !code.preferred_term.ends_with(')') {
+            return Ok(false); // Keep entries without brand name suffix
+        }
+
+        // Must have a parent to compare against
+        let parent_code_id = match &code.parent_code {
+            Some(id) => id,
+            None => return Ok(false), // No parent, keep it
+        };
+
+        // Define hierarchy (same as in amt_csv.rs)
+        // Maps child_type -> parent_type
+        let hierarchy: std::collections::HashMap<&str, &str> = [
+            ("CTPP", "TPP"),
+            ("TPP", "TPUU"),
+            ("TPUU", "TPP TP"),
+            ("TPP TP", "TPUU TP"),
+            ("TPUU TP", "MPP"),
+            ("MPP", "MPUU"),
+            ("MPUU", "MP"),
+        ].iter().cloned().collect();
+
+        // Walk up the hierarchy to find the root MP entry
+        let mut current_id = parent_code_id.clone();
+        let mut current_type = hierarchy.get(code.code_type.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Unknown code type: {}", code.code_type))?
+            .to_string();
+
+        // Walk up until we reach MP
+        while current_type != "MP" {
+            // Look up current parent
+            let key = (current_id.as_str(), current_type.as_str());
+            let value = match table.get(key)? {
+                Some(v) => v,
+                None => return Ok(false), // Parent not found, keep the entry
+            };
+
+            let parent_code: AmtCode = bincode::deserialize(value.value())?;
+
+            // If we've reached MP, compare terms
+            if current_type == "MP" {
+                break;
+            }
+
+            // Move to next parent
+            current_id = match parent_code.parent_code {
+                Some(id) => id,
+                None => {
+                    // No parent but not MP yet - this shouldn't happen, but keep the entry
+                    return Ok(false);
+                }
+            };
+
+            current_type = match hierarchy.get(current_type.as_str()) {
+                Some(parent_type) => parent_type.to_string(),
+                None => return Ok(false), // Unknown type, keep it
+            };
+        }
+
+        // Now current_id and current_type point to the MP entry
+        // Look it up to get its preferred_term
+        let mp_key = (current_id.as_str(), "MP");
+        let mp_value = match table.get(mp_key)? {
+            Some(v) => v,
+            None => return Ok(false), // MP not found, keep the entry
+        };
+
+        let mp_code: AmtCode = bincode::deserialize(mp_value.value())?;
+
+        // Case-insensitive comparison: check if TP term starts with MP term
+        let tp_term_lower = code.preferred_term.to_lowercase();
+        let mp_term_lower = mp_code.preferred_term.to_lowercase();
+
+        // Skip if the TP term starts with the MP term (indicating it's just MP + brand)
+        Ok(tp_term_lower.starts_with(&mp_term_lower))
+    }
+
+    /// Build Tantivy index for AMT codes (public for use in commands)
+    pub(crate) fn build_amt_index(&self, searcher: &mut TerminologySearch) -> Result<()> {
         println!("Building AMT Tantivy index...");
 
         // Clear existing index
@@ -817,9 +910,16 @@ impl<'a> TerminologyImporter<'a> {
         let table = read_txn.open_table(AMT_CODES)?;
 
         let mut indexed = 0;
+        let mut filtered = 0;
         for item in table.iter()? {
             let (_, value) = item?;
             let code: AmtCode = bincode::deserialize(value.value())?;
+
+            // Skip duplicate trade product entries (brand name wrappers of MP terms)
+            if Self::should_skip_duplicate_trade_product(&code, &table)? {
+                filtered += 1;
+                continue;
+            }
 
             searcher.index_amt_code(
                 &code.id,
@@ -831,6 +931,10 @@ impl<'a> TerminologyImporter<'a> {
             if indexed % 1000 == 0 {
                 println!("Indexed {} AMT codes...", indexed);
             }
+        }
+
+        if filtered > 0 {
+            println!("Filtered {} duplicate trade product entries", filtered);
         }
 
         searcher.commit()?;

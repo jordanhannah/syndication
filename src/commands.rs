@@ -396,8 +396,8 @@ pub async fn search_terminology(
     }
 }
 
-/// Search AMT codes for patient use (MP PT and TPP TP PT columns only)
-/// Returns Medicinal Product (MP) and Trade Product Pack (TPP TP) terms for patient-facing searches
+/// Search AMT codes for patient use (MP PT and TPUU TP PT columns only)
+/// Returns Medicinal Product (MP) and Trade Product Unit of Use (TPUU TP) terms for patient-facing searches
 #[tauri::command]
 pub async fn search_amt_patient(
     query: String,
@@ -407,17 +407,17 @@ pub async fn search_amt_patient(
     let searcher = state.searcher.lock().await;
     let limit = limit.unwrap_or(20) as usize;
 
-    // Filter to MP (Medicinal Product) and TPP TP (Trade Product Pack - TP) only
-    // Indexes the MP PT and TPP TP PT columns from AMT CSV
-    let code_types = vec!["MP".to_string(), "TPP TP".to_string()];
+    // Filter to MP (Medicinal Product) and TPUU TP (Trade Product Unit of Use - TP) only
+    // Indexes the MP PT and TPUU TP PT columns from AMT CSV
+    let code_types = vec!["MP".to_string(), "TPUU TP".to_string()];
 
     TerminologyQueries::search_amt(&searcher, &query, limit, Some(&code_types))
         .map_err(|e| format!("AMT patient search failed: {}", e))
 }
 
-/// Search AMT codes for doctor use (MP PT, MPUU PT, TPP TP PT, TPUU PT columns)
-/// Returns Medicinal Product, Medicinal Product Unit of Use, Trade Product Pack, and Trade Product Unit of Use terms
-/// Filters to: MP, MPUU, TPP TP, TPUU TP (4 types as per CLAUDE.md spec)
+/// Search AMT codes for doctor use (MP PT, MPUU PT, TPUU TP PT, TPUU PT columns)
+/// Returns Medicinal Product, Medicinal Product Unit of Use, Trade Product Unit of Use (TP), and Trade Product Unit of Use terms
+/// Filters to: MP, MPUU, TPUU TP, TPUU (4 types as per CLAUDE.md spec)
 #[tauri::command]
 pub async fn search_amt_doctor(
     query: String,
@@ -427,12 +427,12 @@ pub async fn search_amt_doctor(
     let searcher = state.searcher.lock().await;
     let limit = limit.unwrap_or(20) as usize;
 
-    // Filter to doctor-relevant types: MP, MPUU, TPP TP, TPUU TP
+    // Filter to doctor-relevant types: MP, MPUU, TPUU TP, TPUU
     let code_types = vec![
         "MP".to_string(),
         "MPUU".to_string(),
-        "TPP TP".to_string(),
-        "TPUU TP".to_string()
+        "TPUU TP".to_string(),
+        "TPUU".to_string()
     ];
     TerminologyQueries::search_amt(&searcher, &query, limit, Some(&code_types))
         .map_err(|e| format!("AMT doctor search failed: {}", e))
@@ -526,36 +526,23 @@ pub async fn rebuild_amt_index(
 
     println!("Rebuilding AMT Tantivy index from redb storage...");
 
-    // Clear existing index
-    searcher.clear_amt()
-        .map_err(|e| format!("Failed to clear AMT index: {}", e))?;
+    // Use the importer's build_amt_index method which includes filtering
+    // Version ID doesn't matter for rebuild (we're just reading from storage)
+    let importer = crate::import::TerminologyImporter::new(&storage, 0);
 
-    // Read all AMT codes from redb and re-index them
+    importer.build_amt_index(&mut searcher)
+        .map_err(|e| format!("Failed to rebuild AMT index: {}", e))?;
+
+    // Get code counts by type for reporting
     let all_codes = storage
         .get_all_amt_codes()
         .map_err(|e| format!("Failed to read AMT codes: {}", e))?;
 
     let total = all_codes.len();
-    let mut indexed = 0;
     let mut type_counts = std::collections::HashMap::new();
-
     for code in all_codes {
-        searcher.index_amt_code(&code.id, &code.preferred_term, &code.code_type)
-            .map_err(|e| format!("Failed to index code {}: {}", code.id, e))?;
-
         *type_counts.entry(code.code_type.clone()).or_insert(0) += 1;
-        indexed += 1;
-
-        if indexed % 1000 == 0 {
-            println!("Indexed {} / {} AMT codes...", indexed, total);
-        }
     }
-
-    // Commit the index
-    searcher.commit()
-        .map_err(|e| format!("Failed to commit AMT index: {}", e))?;
-
-    println!("AMT index rebuild complete: {} codes indexed", indexed);
 
     // Build breakdown message
     let mut breakdown: Vec<_> = type_counts.iter().collect();
@@ -566,8 +553,8 @@ pub async fn rebuild_amt_index(
         .join("\n");
 
     Ok(format!(
-        "Successfully rebuilt AMT index: {} total codes indexed\n\nBreakdown by type:\n{}",
-        indexed, breakdown_str
+        "Successfully rebuilt AMT index (with filtering applied)\n\nTotal codes in storage: {}\nBreakdown by type:\n{}",
+        total, breakdown_str
     ))
 }
 
